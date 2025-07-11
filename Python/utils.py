@@ -28,12 +28,13 @@ def generate_graph_and_channel_matrices(n: int, B: int, directed: bool = False, 
     adj_matrix = torch.randint(0, 2, (n, n))  # Random binary adjacency matrix
 
     if not directed:
-        adj_matrix = torch.triu(adj_matrix, diagonal=1)  # Keep upper triangular part
-        adj_matrix = adj_matrix + adj_matrix.T  # Make symmetric
+        adj_matrix = torch.triu(adj_matrix, diagonal=1)
+        adj_matrix = adj_matrix + adj_matrix.T
 
     adj_matrix.fill_diagonal_(0)  # No self-loops
+
     channel_matrix_arr = []
-    # Generate channel matrix with Gaussian distribution
+
     for b in range(B):
         torch.manual_seed(seed + b)
         real_part = torch.randn(size=(n, n))
@@ -42,17 +43,22 @@ def generate_graph_and_channel_matrices(n: int, B: int, directed: bool = False, 
         channel_matrix = torch.complex(real_part, imag_part)
 
         if not directed:
-            channel_matrix = (torch.triu(channel_matrix, diagonal=1) + torch.triu(channel_matrix,
-                                                                                  diagonal=1).T) / 2  # Make symmetric
+            channel_matrix = (torch.triu(channel_matrix, diagonal=1) + torch.triu(channel_matrix, diagonal=1).T) / 2
 
-        channel_matrix *= adj_matrix  # Apply adjacency mask to keep only existing links
-        # Normalizing the channel matrix to N(0, 1)
-        m = torch.mean(channel_matrix)
-        std = torch.std(channel_matrix)
-        channel_matrix -= m
-        channel_matrix /= std
-        # Refactoring the channel matrix to N(mu, sigma^2)
-        channel_matrix = (channel_matrix * sigma) + mu
+        # Apply adjacency mask
+        mask = adj_matrix.bool()
+        channel_matrix *= mask  # Zero out nonexistent links
+
+        # Normalize only non-zero entries to N(0,1)
+        non_zero_vals = channel_matrix[mask]
+        if non_zero_vals.numel() > 1:
+            mean = torch.mean(non_zero_vals)
+            std = torch.std(non_zero_vals)
+            normalized_vals = (non_zero_vals - mean) / std
+            # Rescale to N(mu, sigma^2)
+            scaled_vals = normalized_vals * sigma + mu
+            channel_matrix[mask] = scaled_vals  # Update only masked entries
+
         channel_matrix_arr.append(channel_matrix)
 
     return adj_matrix, torch.stack(channel_matrix_arr)
