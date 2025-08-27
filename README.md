@@ -66,14 +66,14 @@ git clone https://github.com/AlterTomer/Decentralized-MANET.git
 cd Decentralized-MANET
 pip install -r requirements.txt
 
-```
+
 ---
 **CUDA Support**
 This project supports GPU acceleration via CUDA for faster training and evaluation.
 If you have a CUDA-enabled GPU and compatible drivers, install the CUDA-enabled version of PyTorch at
 https://pytorch.org/get-started/locally/
 If CUDA is not available, the code automatically falls back to CPU.
-```
+
 ---
 **Usage**
 1) Train a GNN: python scripts/Decentralized_MANET_Simulation.py --config config/train.ini
@@ -92,7 +92,7 @@ Download the official QuaDRiGa MATLAB package and place it under matlab/ (local,
 
 Use your MATLAB scripts (e.g., quadriga_demo.m) to export channel datasets as .mat files.
 Important: this project expects the Fourier transform of the channel H(f), i.e., the frequency-domain response, not the raw time-domain impulse response.
-```
+
 ---
 **Results**
 
