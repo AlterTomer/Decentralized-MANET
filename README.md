@@ -91,8 +91,8 @@ Use your MATLAB scripts (e.g., quadriga_demo.m) to export channel datasets as .m
 
 Important: this project expects the Fourier transform of the channel H(f), i.e., the frequency-domain response, not the raw time-domain impulse response.
 
-If you skip this step, the repository falls back to Rayleigh fading for training and evaluation.
----
+**If you skip this step, the repository falls back to Rayleigh fading for training and evaluation.
+**---
 **Results**
 
 Our ChainedGNN achieves approximately 80% of centralized AdamW performance and about 75% of the waterfilling benchmark, while requiring significantly fewer computations and producing predictions in a single forward pass.
