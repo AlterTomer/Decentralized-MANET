@@ -73,10 +73,13 @@ This project supports GPU acceleration via CUDA for faster training and evaluati
 If you have a CUDA-enabled GPU and compatible drivers, install the CUDA-enabled version of PyTorch at
 https://pytorch.org/get-started/locally/
 If CUDA is not available, the code automatically falls back to CPU.
+```
 ---
 **Usage**
 1) Train a GNN: python scripts/Decentralized_MANET_Simulation.py --config config/train.ini
 2) Evaluate Performance at Multiple SNRs: python scripts/Optimizer_vs_GNN.py --config config/eval.ini
+
+```
 ---
 **Channel Generation (Optional)**
 If you skip this step, the repository defaults to Rayleigh fading for both training and evaluation.
@@ -89,7 +92,7 @@ Download the official QuaDRiGa MATLAB package and place it under matlab/ (local,
 
 Use your MATLAB scripts (e.g., quadriga_demo.m) to export channel datasets as .mat files.
 Important: this project expects the Fourier transform of the channel H(f), i.e., the frequency-domain response, not the raw time-domain impulse response.
-
+```
 ---
 **Results**
 
