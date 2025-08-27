@@ -61,6 +61,7 @@ We compare our GNN approach against a **centralized AdamW optimizer** and a **wa
 
 
 ---
+```text
  **Installation** 
 git clone https://github.com/AlterTomer/Decentralized-MANET.git
 cd Decentralized-MANET
