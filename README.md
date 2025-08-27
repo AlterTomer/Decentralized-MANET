@@ -79,7 +79,7 @@ If CUDA is not available, the code automatically falls back to CPU.
 1) Train a GNN: python scripts/Decentralized_MANET_Simulation.py --config config/train.ini
 2) Evaluate Performance at Multiple SNRs: python scripts/Optimizer_vs_GNN.py --config config/eval.ini
 
-```
+
 ---
 **Channel Generation (Optional)**
 If you skip this step, the repository defaults to Rayleigh fading for both training and evaluation.
