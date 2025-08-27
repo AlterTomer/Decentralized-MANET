@@ -61,19 +61,19 @@ We compare our GNN approach against a **centralized AdamW optimizer** and a **wa
 
 
 ---
-** Installation **
+ **Installation** 
 git clone https://github.com/AlterTomer/Decentralized-MANET.git
 cd Decentralized-MANET
 pip install -r requirements.txt
 
 ---
-** CUDA Support **
+**CUDA Support**
 This project supports GPU acceleration via CUDA for faster training and evaluation.
 If you have a CUDA-enabled GPU and compatible drivers, install the CUDA-enabled version of PyTorch at
 https://pytorch.org/get-started/locally/
 If CUDA is not available, the code automatically falls back to CPU.
 
-** Usage**
+**Usage**
 1) Train a GNN: python scripts/Decentralized_MANET_Simulation.py --config config/train.ini
 2) Evaluate Performance at Multiple SNRs: python scripts/Optimizer_vs_GNN.py --config config/eval.ini
 
