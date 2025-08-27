@@ -59,14 +59,14 @@ We compare our GNN approach against a **centralized AdamW optimizer** and a **wa
 └── visualization/
     └── GraphingAux.py                # Training curves & SNR plots
 
-
+```
 ---
  **Installation** 
 git clone https://github.com/AlterTomer/Decentralized-MANET.git
 cd Decentralized-MANET
 pip install -r requirements.txt
 
-
+```
 ---
 **CUDA Support**
 This project supports GPU acceleration via CUDA for faster training and evaluation.
