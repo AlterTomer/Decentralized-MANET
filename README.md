@@ -79,7 +79,7 @@ If CUDA is not available, the code automatically falls back to CPU.
 2) Evaluate Performance at Multiple SNRs: python scripts/Optimizer_vs_GNN.py --config config/eval.ini
 ---
 **Channel Generation (Optional)**
-
+If you skip this step, the repository defaults to Rayleigh fading for both training and evaluation.
 For realistic, geometry-based channels, this repository supports datasets generated with QuaDRiGa (Fraunhofer HHI):
 https://github.com/fraunhoferhhi/QuaDRiGa
 
@@ -88,11 +88,9 @@ To generate your own channels:
 Download the official QuaDRiGa MATLAB package and place it under matlab/ (local, not required in this repo).
 
 Use your MATLAB scripts (e.g., quadriga_demo.m) to export channel datasets as .mat files.
-
 Important: this project expects the Fourier transform of the channel H(f), i.e., the frequency-domain response, not the raw time-domain impulse response.
 
-**If you skip this step, the repository falls back to Rayleigh fading for training and evaluation.
-**---
+---
 **Results**
 
 Our ChainedGNN achieves approximately 80% of centralized AdamW performance and about 75% of the waterfilling benchmark, while requiring significantly fewer computations and producing predictions in a single forward pass.
