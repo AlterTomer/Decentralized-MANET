@@ -66,7 +66,7 @@ git clone https://github.com/AlterTomer/Decentralized-MANET.git
 cd Decentralized-MANET
 pip install -r requirements.txt
 
-```
+
 ---
 **CUDA Support**
 This project supports GPU acceleration via CUDA for faster training and evaluation.
