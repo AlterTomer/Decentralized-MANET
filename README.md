@@ -48,16 +48,23 @@ We compare our GNN approach against a **centralized AdamW optimizer** and a **wa
 │   └── Optimizer_vs_GNN.py                 # AdamW vs GNN vs waterfilling eval
 ├── utils/
 │   ├── PathUtils.py                  # Path search + tensorization
-│   ├── TensorUtils.py                # Power init & normalization
-│   ├── TrainUtils.py                 # LR schedulers, checkpoint helpers
-│   ├── CentralizedUtils.py           # Centralized AdamW + waterfilling
-│   ├── ComparisonUtils.py            # SNR sweep comparison harness
-│   ├── ConfigUtils.py                # CLI / INI parsing utilities
-│   ├── EstimationUtils.py            # LMMSE estimation helpers
-│   ├── FilesUtils.py                 # Atomic save + checkpoint management
-│   └── MetricUtils.py                # Rate computation & smooth-min approximation
-└── visualization/
-    └── GraphingAux.py                # Training curves & SNR plots
+│   ├── TensorUtils.py               # Power init & normalization
+│   ├── TrainUtils.py                # LR schedulers, checkpoint helpers
+│   ├── CentralizedUtils.py          # Centralized AdamW + waterfilling
+│   ├── ComparisonUtils.py           # SNR sweep comparison harness
+│   ├── ConfigUtils.py              # CLI / INI parsing utilities
+│   ├── EstimationUtils.py          # LMMSE estimation helpers
+│   ├── FilesUtils.py               # Atomic save + checkpoint management
+│   ├── MetricUtils.py              # Rate computation & smooth-min approximation
+│   └── DataUtils.py                # Graph generation & dataset building
+├── visualization/
+│   └── GraphingAux.py              # Training curves & SNR plots
+├── matlab/
+│   ├── channel_to_freq.m                          # Converts time-domain channel to frequency response
+│   ├── generate_quadriga_channels_with_scenario.m # Generates QuaDRiGa-based channels
+│   └── quadriga_demo.m                            # Demo for channel generation
+└── images/                         # Figures for README & evaluation
+
 
 ```
 ---
@@ -82,16 +89,18 @@ If CUDA is not available, the code automatically falls back to CPU.
 
 ---
 **Channel Generation (Optional)**
-If you skip this step, the repository defaults to Rayleigh fading for both training and evaluation.
-For realistic, geometry-based channels, this repository supports datasets generated with QuaDRiGa (Fraunhofer HHI):
-https://github.com/fraunhoferhhi/QuaDRiGa
+or realistic, geometry-based channels, this repository supports datasets generated with [QuaDRiGa (Fraunhofer HHI)](https://github.com/fraunhoferhhi/QuaDRiGa).
 
 To generate your own channels:
 
-Download the official QuaDRiGa MATLAB package and place it under matlab/ (local, not required in this repo).
-
-Use your MATLAB scripts (e.g., quadriga_demo.m) to export channel datasets as .mat files.
-Important: this project expects the Fourier transform of the channel H(f), i.e., the frequency-domain response, not the raw time-domain impulse response.
+1. Download the official [QuaDRiGa MATLAB package](https://github.com/fraunhoferhhi/QuaDRiGa).
+2. Use our provided MATLAB scripts in [`matlab/`](matlab/) to create frequency-domain channel responses:
+   - [`channel_to_freq.m`](matlab/channel_to_freq.m): Converts time-domain channel impulse response to frequency-domain response.
+   - [`generate_quadriga_channels_with_scenario.m`](matlab/generate_quadriga_channels_with_scenario.m): Generates channels using custom scenarios.
+   - [`quadriga_demo.m`](matlab/quadriga_demo.m): Example of generating channel datasets.
+3. Export the dataset as `.mat` files.
+4. **Important:** The project expects the **frequency-domain channel** \(H(f)\), not the raw time-domain impulse response.
+5. If you skip this step, the repository defaults to **Rayleigh fading** for training and evaluation.
 
 ---
 **Results**
