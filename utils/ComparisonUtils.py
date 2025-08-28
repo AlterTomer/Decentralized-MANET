@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from CentralizedUtils import evaluate_centralized_adam, compute_lower_bound_rate
 from PathUtils import find_all_paths, paths_to_tensor
-from GraphNetAux import _compute_rates_per_layer
+from models.GraphNetAux import _compute_rates_per_layer
 
 
 # -------------------------------

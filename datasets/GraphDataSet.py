@@ -1,8 +1,8 @@
 from torch_geometric.data import Data, Dataset
 from torch_geometric.utils import dense_to_sparse
 import torch
-from TensorUtils import create_normalized_tensor, normalize_power
-from CentralizedUtils import compute_lower_bound_rate_single
+from utils.TensorUtils import create_normalized_tensor, normalize_power
+from utils.CentralizedUtils import compute_lower_bound_rate_single
 
 
 class GraphNetDataset(Dataset):

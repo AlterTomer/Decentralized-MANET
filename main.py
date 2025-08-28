@@ -4,13 +4,13 @@ import torch
 from torch_geometric.loader import DataLoader
 import random
 import numpy as np
-from DataUtils import generate_graph_data
-from CentralizedUtils import evaluate_centralized_adam, compute_lower_bound_rate, evaluate_centralized_adam_single, compute_lower_bound_rate_single
-from models import ChainedGNN
-from TensorUtils import normalize_power
-from MetricUtils import calc_sum_rate
-from PathUtils import find_all_paths, paths_to_tensor
-from GraphNetAux import _compute_rates_per_layer
+from utils.DataUtils import generate_graph_data
+from utils.CentralizedUtils import evaluate_centralized_adam, compute_lower_bound_rate, evaluate_centralized_adam_single, compute_lower_bound_rate_single
+from models.models import ChainedGNN
+from utils.TensorUtils import normalize_power
+from utils.MetricUtils import calc_sum_rate
+from utils.PathUtils import find_all_paths, paths_to_tensor
+from models.GraphNetAux import _compute_rates_per_layer
 # === DATA PREPARATION ===
 channel_path = None
 num_samples = 4000

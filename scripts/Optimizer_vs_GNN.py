@@ -1,11 +1,11 @@
 import torch
 from torch.optim.swa_utils import AveragedModel
-from models import ChainedGNN
-from DataUtils import generate_graph_data
-from ComparisonUtils import evaluate_across_snr
+from models.models import ChainedGNN
+from utils.DataUtils import generate_graph_data
+from utils.ComparisonUtils import evaluate_across_snr
 from configparser import ConfigParser
-from GraphingAux import plot_mean_rate_vs_snr
-from CentralizedUtils import compute_equal_power_bound
+from visualization.GraphingAux import plot_mean_rate_vs_snr
+from utils.CentralizedUtils import compute_equal_power_bound
 
 # ====== config ======
 # args = parse_args()

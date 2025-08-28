@@ -3,7 +3,7 @@ import numpy as np
 from scipy.io import loadmat
 import mat73
 
-from GraphDataSet import GraphNetDataset
+from datasets.GraphDataSet import GraphNetDataset
 
 #=======================================================================================================================
 # Graph and Dataset Generation

@@ -5,7 +5,7 @@ import networkx as nx
 import numpy as np
 import os
 import torch
-from MetricUtils import link_rate
+from utils.MetricUtils import link_rate
 
 def plot_train_valid_loss(train_loss, valid_rate, filename=False):
     """

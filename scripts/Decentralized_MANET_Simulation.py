@@ -9,13 +9,13 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 from torch.optim.lr_scheduler import LambdaLR
 from pathlib import Path
 from configparser import ConfigParser
-from models import ChainedGNN
-from GraphNetAux import train_chained, validate_chained, tau_linear
-from DataUtils import generate_graph_data
-from TrainUtils import cosine_warm_restart_lambda
-from FilesUtils import save_best_ckpt
-from EstimationUtils import masked_band_variance_from_dataset
-from GraphingAux import plot_train_valid_loss
+from models.models import ChainedGNN
+from models.GraphNetAux import train_chained, validate_chained, tau_linear
+from utils.DataUtils import generate_graph_data
+from utils.TrainUtils import cosine_warm_restart_lambda
+from utils.FilesUtils import save_best_ckpt
+from utils.EstimationUtils import masked_band_variance_from_dataset
+from visualization.GraphingAux import plot_train_valid_loss
 from time import time
 
 # ====== config ======
