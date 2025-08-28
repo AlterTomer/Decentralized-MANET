@@ -103,34 +103,28 @@ To generate your own channels:
 5. If you skip this step, the repository defaults to **Rayleigh fading** for training and evaluation.
 
 ---
-## **Results**
+## Results
 
-Our ChainedGNN achieves approximately 80% of centralized AdamW performance and about 75% of the waterfilling benchmark, while requiring significantly fewer computations and producing predictions in a single forward pass.
+Our **ChainedGNN** achieves approximately **80%** of the centralized **AdamW** performance and about **75%** of the **waterfilling benchmark**,  
+while requiring significantly fewer computations and producing predictions in a **single forward pass**.
 
-Method comparison (n nodes, B frequency bands, L GatedGCN layers, I centralized iterations, P number of candidate paths between tx and rx):
-Example for n = 8, B = 6, L = 3, I = 50, P = 20 
-ChainedGNN (ours):
-• Global CSI: No
-• Computation per sample: O(L·n²(1 + B) ≈ 530 operations
-• Scalability: High
+### Method Comparison
 
-Centralized AdamW:
-• Global CSI: Yes
-• Computation per sample: O(I·B·n²) ≈ 19,200 operations
-• Scalability: Low
+| Method            | Global CSI | Computation per Sample                | Scalability |
+| ----------------- | ---------- | ------------------------------------- | ----------- |
+| **ChainedGNN**    | No         | $\mathcal{O}(L \cdot n^2 (1+B)) \approx 530$ ops | **High**    |
+| **AdamW**        | Yes        | $\mathcal{O}(I \cdot B \cdot n^2) \approx 19{,}200$ ops | Low |
+| **Waterfilling** | Yes        | $\mathcal{O}(P \cdot B \cdot n^2) \approx 7{,}680$ ops | Low |
 
-Waterfilling:
-• Global CSI: Yes
-• Computation per sample: O(P·B·n²) ≈ 7,680 operations
-• Scalability: Low
+---
 
-Example figures (update paths if needed):
+### Visualization of Results
 
-Training/validation (Rayleigh):
-Train Quadriga_Lin_TAU_ChainedGNN_3 layers 6 bands network.png
+| Training & Validation | Comparison (Rayleigh) | Comparison (QuaDRiGa) |
+| --------------------- | ---------------------- | ---------------------- |
+| ![Train/Valid](images/train_valid.png) | ![Comparison Rayleigh](images/comparison_rayleigh.png) | ![Comparison QuaDRiGa](images/comparison_quadriga.png) |
 
-Comparison (Rayleigh):
-Comparison lin tau.png
+- **Left:** Training and validation curves showing efficient model convergence.
+- **Middle:** Sum-rate comparison under **Rayleigh fading**.
+- **Right:** Sum-rate comparison under **QuaDRiGa channels**.
 
-Comparison (QuaDRiGa):
-Comparison lin tau Quadriga.png
