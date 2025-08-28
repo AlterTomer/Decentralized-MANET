@@ -82,6 +82,14 @@ https://pytorch.org/get-started/locally/
 If CUDA is not available, the code automatically falls back to CPU.
 
 ---
+### Example Configurations
+
+Example `.ini` files are provided under [`config/`](config/):
+
+- **training_example.ini** → Training a ChainedGNN.
+- **comparison_example.ini** → Evaluating GNN vs AdamW vs Waterfilling.
+
+---
 ## **Usage**
 1) Train a GNN: python scripts/Decentralized_MANET_Simulation.py --config config/train.ini
 2) Evaluate Performance at Multiple SNRs: python scripts/Optimizer_vs_GNN.py --config config/eval.ini
