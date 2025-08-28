@@ -9,6 +9,7 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 from torch.optim.lr_scheduler import LambdaLR
 from pathlib import Path
 from configparser import ConfigParser
+from utils.ConfigUtils import parse_args, load_ini_config
 from models.models import ChainedGNN
 from models.GraphNetAux import train_chained, validate_chained, tau_linear
 from utils.DataUtils import generate_graph_data
@@ -19,12 +20,12 @@ from visualization.GraphingAux import plot_train_valid_loss
 from time import time
 
 # ====== config ======
-# args = parse_args()
-# cfg_path = args.config.resolve()
-# parser = load_ini_config(cfg_path)
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN Estimated Rayleigh B_6 L_3 seed_1337.ini"
-parser = ConfigParser()
-parser.read_file(open(cfg_path))
+args = parse_args()
+cfg_path = args.config.resolve()
+parser = load_ini_config(cfg_path)
+# cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN Estimated Rayleigh B_6 L_3 seed_1337.ini"
+# parser = ConfigParser()
+# parser.read_file(open(cfg_path))
 
 USE_AMP = torch.cuda.is_available()
 # Training Parameters
