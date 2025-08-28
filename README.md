@@ -122,9 +122,10 @@ while requiring significantly fewer computations and producing predictions in a 
 
 | Training & Validation | Comparison (Rayleigh) | Comparison (QuaDRiGa) |
 | --------------------- | ---------------------- | ---------------------- |
-| <img src="images/train_valid.png" width="400"> | <img src="images/comparison_rayleigh.png" width="400"> | <img src="images/comparison_quadriga.png" width="400"> |
+| <img src="images/train_valid.png" width="800"> | <img src="images/comparison_rayleigh.png" width="800"> | <img src="images/comparison_quadriga.png" width="800"> |
 
 - **Left:** Training and validation curves showing efficient model convergence.
 - **Middle:** Sum-rate comparison under **Rayleigh fading**.
 - **Right:** Sum-rate comparison under **QuaDRiGa channels**.
+  
 Both **Rayleigh fading** and **QuaDRiGa** channels were generated with expected value $\mu = 0$ and variance $\sigma^2 = 1$.
