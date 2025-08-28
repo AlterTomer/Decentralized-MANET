@@ -121,9 +121,9 @@ while requiring significantly fewer computations and producing predictions in a 
 ### Visualization of Results
 
 <div align="center">
-  <img src="images/train_valid.png" width="500" style="margin-right: 15px;">
-  <img src="images/comparison_rayleigh.png" width="500" style="margin-right: 15px;">
-  <img src="images/comparison_quadriga.png" width="500">
+  <img src="images/train_valid.png" width="650" style="margin-right: 20px;">
+  <img src="images/comparison_rayleigh.png" width="400" style="margin-right: 20px;">
+  <img src="images/comparison_quadriga.png" width="400">
 </div>
 
 - **Left:** Training and validation curves showing efficient model convergence.
