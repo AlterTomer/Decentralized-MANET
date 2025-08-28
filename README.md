@@ -120,9 +120,11 @@ while requiring significantly fewer computations and producing predictions in a 
 
 ### Visualization of Results
 
-| Training & Validation | Comparison (Rayleigh) | Comparison (QuaDRiGa) |
-| --------------------- | ---------------------- | ---------------------- |
-| <img src="images/train_valid.png" width="800"> | <img src="images/comparison_rayleigh.png" width="800"> | <img src="images/comparison_quadriga.png" width="800"> |
+<div align="center">
+  <img src="images/train_valid.png" width="500" style="margin-right: 15px;">
+  <img src="images/comparison_rayleigh.png" width="500" style="margin-right: 15px;">
+  <img src="images/comparison_quadriga.png" width="500">
+</div>
 
 - **Left:** Training and validation curves showing efficient model convergence.
 - **Middle:** Sum-rate comparison under **Rayleigh fading**.
