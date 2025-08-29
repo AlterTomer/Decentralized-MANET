@@ -1,0 +1,26 @@
+# Core
+numpy
+scipy
+pandas
+matplotlib
+tqdm
+omegaconf
+rich
+
+# PyTorch (install a CUDA wheel separately if you want GPU;
+# this default pulls CPU wheels in most CI boxes)
+torch>=2.2
+
+# PyTorch Geometric stack (match to your torch version if you pin it tightly)
+torch-geometric>=2.5
+torch-scatter
+torch-sparse
+pyg-lib
+
+# Testing & linting
+pytest
+pytest-cov
+pre-commit
+black
+isort
+flake8
