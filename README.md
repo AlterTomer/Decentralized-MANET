@@ -84,10 +84,67 @@ If CUDA is not available, the code automatically falls back to CPU.
 ---
 ### Example Configurations
 
-Example `.ini` files are provided under [`config/`](config/):
+Example `.ini` files are provided under [`config/`](config/) for **training** and **evaluation**.  
+These allow you to control experiments without modifying the code directly.
 
-- **training_example.ini** → Training a ChainedGNN.
-- **comparison_example.ini** → Evaluating GNN vs AdamW vs Waterfilling.
+---
+
+#### **1. Training Config (`training_example.ini`)**
+
+Defines all parameters required for training the **ChainedGNN** model:
+
+- **General Parameters**
+  - `SEED` — Random seed for reproducibility.
+  - `B` — Number of frequency bands.
+  - `L` — Number of GNN layers.
+  - `n` — Number of network nodes.
+  - `tx` — Index of the transmitter node.
+  - `sigma` — Noise variance.
+  - `num samples` — Number of graphs to generate.
+  - `grad batch` — Mini-batch size during training.
+
+- **Optimization Parameters**
+  - `lr` — Learning rate.
+  - `wd` — Weight decay.
+  - `dropout` — Dropout probability.
+  - `grad clip` — Gradient clipping value.
+  - `epochs` — Maximum number of training epochs.
+  - `supervised epochs` — Warm-up epochs with supervised loss.
+  - `mono` — Weight for the monotonicity penalty.
+  - `supervised loss mode` — Loss type for supervised warm-up.
+
+- **SWA and Estimation**
+  - `swa enabled` — Enable / disable Stochastic Weight Averaging.
+  - `swa start frac` — Fraction of training after which SWA starts.
+  - `LMMSE estimation` — Whether to use estimated or ground-truth CSI.
+
+- **File Paths**
+  - `channel path` — Optional precomputed channel dataset.
+  - `ckpt dir` — Directory for saving checkpoints.
+  - `figs dir` — Directory for storing plots.
+  - `prefix` — Prefix for checkpoint filenames.
+  - `include training state` — Save optimizer state in checkpoints.
+
+---
+
+#### **2. Comparison Config (`comparison_example.ini`)**
+
+Defines parameters for evaluating **GNN vs centralized optimizer vs waterfilling**:
+
+- **Experiment Parameters**
+  - `SEED`, `B`, `L`, `n`, `tx`, `sigma`, `dropout`, `num samples`
+    *(same meaning as above).*
+
+- **File Paths**
+  - `channel path` — Optional precomputed channel dataset.
+  - `fig path` — Directory for saving result plots.
+  - `model path` — Path to a trained GNN checkpoint.
+  - `swa path` — Path to an SWA-averaged model.
+
+---
+
+These configuration files make it easy to reproduce experiments and run custom setups  
+without changing any source code.
 
 ---
 ## **Usage**
