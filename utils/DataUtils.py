@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from scipy.io import loadmat
 import mat73
 
 from datasets.GraphDataSet import GraphNetDataset

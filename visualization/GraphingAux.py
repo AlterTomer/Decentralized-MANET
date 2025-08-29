@@ -42,18 +42,17 @@ def plot_train_valid_loss(train_loss, valid_rate, filename=False):
 
 
 def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
-    adam = list(results["adam"].values())
+    adam = list(results["centralized"].values())
     gnn = list(results["gnn"].values())
-    lb = list(results["lower"].values())
-    if 'swa' in results.keys():
-        swa = list(results["swa"].values())
+    sbn = list(results["strongest bottleneck"].values())
+    ep = list(results["equal power"].values())
 
     plt.figure(figsize=(10, 8))
     plt.plot(snr_db, adam, marker="o", label="Centralized Optimization")
     plt.plot(snr_db, gnn,  marker="s", label="Decentralized Optimization")
-    plt.plot(snr_db, lb,   marker="^", label="Strongest Bottleneck")
-    # if 'swa' in results.keys():
-    #     plt.plot(snr_db, swa, marker="+", label="SWA")
+    plt.plot(snr_db, sbn,   marker="^", label="Strongest Bottleneck")
+    plt.plot(snr_db, ep, marker="+", label="Equal Power")
+
 
     plt.yscale("log")
     plt.xlabel("SNR (dB)", fontsize=14)

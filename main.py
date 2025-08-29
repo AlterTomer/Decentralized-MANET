@@ -1,14 +1,9 @@
-import os
-import csv
 import torch
-from torch_geometric.loader import DataLoader
 import random
 import numpy as np
 from utils.DataUtils import generate_graph_data
-from utils.CentralizedUtils import evaluate_centralized_adam, compute_lower_bound_rate, evaluate_centralized_adam_single, compute_lower_bound_rate_single
+from utils.CentralizedUtils import evaluate_centralized_adam_single
 from models.models import ChainedGNN
-from utils.TensorUtils import normalize_power
-from utils.MetricUtils import calc_sum_rate
 from utils.PathUtils import find_all_paths, paths_to_tensor
 from models.GraphNetAux import _compute_rates_per_layer
 # === DATA PREPARATION ===
@@ -70,18 +65,5 @@ mean_gnn = sum(gnn_rates) / len(gnn_rates)
 mean_adam = sum(adamw_rates) / len(adamw_rates)
 print(f'gnn mean: {mean_gnn: .4f}, adam mean: {mean_adam: .4f}')
 print(f'adam wins: {adam_wins}, gnn wins: {gnn_wins}, lb wins: {lb_wins} ,ties: {tie}')
-# loader = DataLoader(dataset, batch_size=1, shuffle=True)
-#
-# results = evaluate_centralized_adam(loader, B, lr=0.05, num_iterations=35)
-# os.chdir(r'C:\Users\alter\Desktop\PhD\Decentralized MANET\Supervised Datasets')
-# name = f"triplet_dataset_num_samples_{num_samples}_seed_{SEED}_B_{B}.pt"
-# torch.save(results, name)
-#
-# lower_bounds, _ = compute_lower_bound_rate(dataset)
-# filename = f'Lower_Bounds_num_samples_{num_samples}_starter_seed_{SEED}_B_{B}.csv'
-# with open(filename, mode='w', newline='') as file:
-#     writer = csv.writer(file)
-#     writer.writerow(["Graph Index", "Lower Bound Rate"])
-#     for i, rate in enumerate(lower_bounds):
-#         writer.writerow([i, rate])
+
 

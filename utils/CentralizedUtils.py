@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from PathUtils import find_all_paths, paths_to_tensor
-from TensorUtils import normalize_power, create_normalized_tensor, init_equal_power
-from MetricUtils import calc_sum_rate
+from utils.PathUtils import find_all_paths, paths_to_tensor
+from utils.TensorUtils import normalize_power, create_normalized_tensor, init_equal_power
+from utils.MetricUtils import calc_sum_rate
 
 #=======================================================================================================================
 # Centralized Optimization
@@ -144,9 +144,9 @@ def evaluate_centralized_adam_single(data, B, lr=0.1, num_iterations=100):
 
 
 
-def compute_lower_bound_rate(dataset, sigma_noise=False):
+def compute_strongest_bottleneck_rate(dataset, sigma_noise=False):
     """
-    Compute the lower bound rate for each graph in the dataset.
+    Compute the strongest bottleneck rate for each graph in the dataset.
     The lower bound is determined by the strongest weakest link among all paths
     and all frequency bands between Tx and Rx.
 
@@ -307,3 +307,57 @@ def compute_equal_power_bound(dataset, sigma_noise=False):
         rate_bounds.append(rate)
 
     return np.array(rate_bounds), p_arr
+
+def random_single_band_equal_power(
+    B: int,
+    adj: torch.Tensor,              # [n, n] bool/0-1 adjacency (undirected); adj[i,i] is ignored
+    generator: torch.Generator | None = None,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, int]:
+    """
+    Create P ∈ R^{B×n×n} where:
+      • Pick b* ~ Uniform{0,...,B-1}
+      • For each node i, distribute power equally over its neighbors N(i) (exclude i),
+        i.e., P[b*, i, j] = 1/sqrt(|N(i)|) for j ∈ N(i), else 0.
+      • For b ≠ b*, P[b, :, :] = 0.
+    This yields per-row L2=1 when |N(i)|>0; rows with no neighbors remain all-zero.
+
+    Returns:
+        P: [B, n, n] tensor
+        b_star: the chosen band index
+    """
+    if device is None:
+        device = adj.device
+    if dtype is None:
+        # use float32 by default
+        dtype = torch.float32
+
+    adj = adj.to(device=device, dtype=torch.bool)
+    n = adj.shape[0]
+    assert adj.shape == (n, n), "adj must be [n, n]"
+
+    if generator is None:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(torch.seed())  # non-deterministic by default
+
+    b_star = int(torch.randint(low=0, high=B, size=(1,), generator=generator).item())
+
+    P = torch.zeros((B, n, n), device=device, dtype=dtype)
+
+    # Ignore self edges explicitly
+    no_self = adj.clone()
+    idx = torch.arange(n, device=device)
+    no_self[idx, idx] = False
+
+    # For each node i, set 1/sqrt(deg(i)) on neighbors in band b*
+    for i in range(n):
+        neighbors = torch.nonzero(no_self[i], as_tuple=False).flatten()
+        k = neighbors.numel()
+        if k > 0:
+            val = (1.0 / (k ** 0.5))
+            P[b_star, i, neighbors] = val  # row i normalized in L2
+
+    return P, b_star
+
+
