@@ -5,7 +5,6 @@ import torch
 from torch.utils.data import random_split
 from torch_geometric.loader import DataLoader
 from torch.amp import GradScaler
-from torch.optim.swa_utils import AveragedModel, SWALR
 from torch.optim.lr_scheduler import LambdaLR
 from pathlib import Path
 from configparser import ConfigParser
@@ -20,12 +19,12 @@ from visualization.GraphingAux import plot_train_valid_loss
 from time import time
 
 # ====== config ======
-args = parse_args()
-cfg_path = args.config.resolve()
-parser = load_ini_config(cfg_path)
-# cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN Estimated Rayleigh B_6 L_3 seed_1337.ini"
-# parser = ConfigParser()
-# parser.read_file(open(cfg_path))
+# args = parse_args()
+# cfg_path = args.config.resolve()
+# parser = load_ini_config(cfg_path)
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN B_6 L_3 seed_1337 n_12.ini"
+parser = ConfigParser()
+parser.read_file(open(cfg_path))
 
 USE_AMP = torch.cuda.is_available()
 # Training Parameters
@@ -42,12 +41,10 @@ WEIGHT_DECAY = float(train_params["wd"])
 GRAD_CLIP = float(train_params["grad clip"])
 MAX_EPOCHS = int(train_params["epochs"])
 supervised_epochs = int(train_params["supervised epochs"])
-SWA_START_FRAC = float(train_params["swa start frac"])
 num_samples = int(train_params["num samples"])
 grad_batch = int(train_params["grad batch"])
 MONO = float(train_params["mono"])
 sup_loss_mode = train_params["supervised loss mode"]
-swa_enabled = True if int(train_params["swa enabled"]) == 1 else False
 est_csi = True if int(train_params["LMMSE estimation"]) == 1 else False
 
 # Files Parameters
@@ -130,22 +127,12 @@ scheduler = LambdaLR(optimizer, lr_lambda=cosine_warm_restart_lambda(lr_warmup_e
 
 scaler = GradScaler(enabled=USE_AMP)
 
-# SWA
-swa_start = int(SWA_START_FRAC * MAX_EPOCHS)
-swa_model = AveragedModel(model).to(device)
-swa_model.B = getattr(model, "B", B)
-swa_model.num_layers = getattr(model, "num_layers", L)
-swa_scheduler = None  # created once we hit swa_start
-
 # ====== checkpoints ======
 print(f">>> {num_samples} samples simulation | seed={SEED} | AMP={USE_AMP} | grad_clip={GRAD_CLIP}")
 
 os.makedirs(CKPT_DIR, exist_ok=True)
 best_val = -float("inf")
 best_ckpt = None
-
-best_swa_val = -float("inf")
-best_swa_ckpt = None
 
 train_loss_arr = np.zeros(MAX_EPOCHS)
 val_rate_arr = np.zeros(MAX_EPOCHS)
@@ -177,16 +164,8 @@ for epoch in range(MAX_EPOCHS):
     )
 
 
-    # --- step LR or do SWA ---
-    if epoch < swa_start:
-        scheduler.step()
-    else:
-        if swa_scheduler is None:
-            swa_scheduler = SWALR(optimizer, swa_lr=2e-4, anneal_epochs=5, anneal_strategy="cos")
-        swa_scheduler.step()
-        swa_model.update_parameters(model)
-        swa_enabled = True
-
+    # --- step LR ---
+    scheduler.step()
     # --- validation (rate-based) ---
     val_stats = validate_chained(
         model,
@@ -197,42 +176,6 @@ for epoch in range(MAX_EPOCHS):
         log_interval=1000,
     )
 
-    # --- optional: also evaluate SWA snapshot mid-training ---
-    if swa_enabled:
-        swa_model.eval()
-        swa_stats = validate_chained(
-            swa_model,
-            val_loader,
-            device=device,
-            csv_path=None,
-            epoch=epoch,
-            log_interval=1000,
-        )
-        swa_best = swa_stats["best_rate"]
-
-        # --- track best SWA ---
-        if swa_best > best_swa_val:
-            old_swa = best_swa_ckpt
-            best_swa_val = swa_best
-            best_swa_ckpt = save_best_ckpt(
-                model=swa_model,
-                epoch=epoch,
-                best_val=best_swa_val,
-                cfg_path=cfg_path,
-                ckpt_dir=CKPT_DIR,
-                prefix=f"{ckpt_prefix}_SWA",
-                include_training_state=False
-            )
-            if old_swa and os.path.exists(old_swa):
-                try:
-                    os.remove(old_swa)
-                    print(f"🗑️ Deleted previous SWA checkpoint: {old_swa}")
-                except Exception as e:
-                    print(f"⚠️ Failed to delete {old_swa}: {e}")
-            print(f"✅ New best SWA model saved: {best_swa_ckpt}")
-    else:
-        swa_best = float("nan")
-
     # --- log ---
     train_loss_arr[epoch] = stats["loss"]
     val_rate_arr[epoch] = val_stats["best_rate"]
@@ -241,7 +184,6 @@ for epoch in range(MAX_EPOCHS):
         f"Time {(time() - t1) / 60: .3f} mins"
         f"train_loss={stats['loss']:.6f} | "
         f"val_best={val_stats['best_rate']:.6f} | "
-        f"swa_best={swa_best:.6f} | "
         f"val_norm_dev={val_stats['max_norm_dev']:.2e}"
     )
 
@@ -253,10 +195,8 @@ for epoch in range(MAX_EPOCHS):
             model=model, epoch=epoch, best_val=best_val, cfg_path=cfg_path,
             ckpt_dir=CKPT_DIR, prefix=ckpt_prefix, include_training_state=include_training_state,
             optimizer=optimizer,
-            scheduler=(swa_scheduler if (swa_enabled and epoch >= swa_start) else scheduler),
+            scheduler=scheduler,
             scaler=scaler,
-            swa_model=(swa_model if (swa_enabled and epoch >= swa_start) else None),
-            swa_scheduler=(swa_scheduler if (swa_enabled and epoch >= swa_start) else None),
         )
         if old and os.path.exists(old):
             try:
@@ -270,13 +210,8 @@ for epoch in range(MAX_EPOCHS):
 print(f'Training time = {(time() - t0) / 60} mins')
 final_raw = validate_chained(model, val_loader, device=device, epoch=MAX_EPOCHS, log_interval=1000)
 
-swa_model.to(device)
-swa_model.eval()
-final_swa = validate_chained(swa_model, val_loader, device=device, epoch=MAX_EPOCHS, log_interval=1000)
-
 print(
     f"Final compare -> raw: {final_raw['best_rate']:.6f} | "
-    f"SWA: {final_swa['best_rate']:.6f}"
 )
 
 os.chdir(figs_dir)

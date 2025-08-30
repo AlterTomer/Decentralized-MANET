@@ -15,7 +15,7 @@ def format_best_fname(prefix, L, best_val):
 
 def save_best_ckpt(*, model, epoch, best_val, cfg_path, ckpt_dir, prefix,
                    include_training_state, optimizer=None, scheduler=None,
-                   scaler=None, swa_model=None, swa_scheduler=None):
+                   scaler=None):
     fname = format_best_fname(prefix, model.num_layers, best_val)
     fpath = os.path.join(ckpt_dir, fname)
     payload = {
@@ -29,7 +29,5 @@ def save_best_ckpt(*, model, epoch, best_val, cfg_path, ckpt_dir, prefix,
         if optimizer is not None: payload["optimizer_state"] = optimizer.state_dict()
         if scheduler is not None: payload["scheduler_state"] = scheduler.state_dict()
         if scaler is not None:    payload["scaler_state"]    = scaler.state_dict()
-        if swa_model is not None: payload["swa_state"]       = swa_model.state_dict()
-        if swa_scheduler is not None: payload["swa_scheduler_state"] = swa_scheduler.state_dict()
     atomic_save(payload, fpath)
     return fpath

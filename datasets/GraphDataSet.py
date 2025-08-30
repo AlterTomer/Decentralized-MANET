@@ -2,7 +2,6 @@ from torch_geometric.data import Data, Dataset
 from torch_geometric.utils import dense_to_sparse
 import torch
 from utils.TensorUtils import create_normalized_tensor, normalize_power
-from utils.CentralizedUtils import compute_lower_bound_rate_single
 
 
 class GraphNetDataset(Dataset):
@@ -38,7 +37,6 @@ class GraphNetDataset(Dataset):
 
         node_feats = torch.stack([create_normalized_tensor(adj.shape[0], adj.shape[1], mask=adj, device=links.device) for _ in range(self.B)])
         node_feats = normalize_power(node_feats, adj, eps=1e-12)
-        # _, node_feats = compute_lower_bound_rate_single(self.sigma_list[idx], adj, links, self.B, self.tx_list[idx], self.rx_list[idx])
 
         data = Data(x=node_feats, edge_index=edge_index.to(self.device), edge_attr=edge_attr)
         data.sample_id = torch.tensor(idx)
