@@ -27,7 +27,6 @@ We compare our GNN approach against a **centralized AdamW optimizer** and a **wa
 
 - **Training Tools**  
   - Cosine warm restarts scheduler.  
-  - Optional SWA.  
   - Best checkpoint saving with automatic cleanup.
 
 ---
@@ -113,9 +112,7 @@ Defines all parameters required for training the **ChainedGNN** model:
   - `mono` — Weight for the monotonicity penalty.
   - `supervised loss mode` — Loss type for supervised warm-up.
 
-- **SWA and Estimation**
-  - `swa enabled` — Enable / disable Stochastic Weight Averaging.
-  - `swa start frac` — Fraction of training after which SWA starts.
+- **Estimation**
   - `LMMSE estimation` — Whether to use estimated or ground-truth CSI.
 
 - **File Paths**
@@ -139,7 +136,6 @@ Defines parameters for evaluating **GNN vs centralized optimizer vs waterfilling
   - `channel path` — Optional precomputed channel dataset.
   - `fig path` — Directory for saving result plots.
   - `model path` — Path to a trained GNN checkpoint.
-  - `swa path` — Path to an SWA-averaged model.
 
 ---
 
