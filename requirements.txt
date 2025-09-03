@@ -8,9 +8,12 @@ omegaconf
 rich
 
 # PyTorch (install a CUDA wheel separately if you want GPU;
-# this default pulls CPU wheels in most CI boxes)
-torch>=2.2
-
-# PyTorch Geometric stack (match to your torch version if you pin it tightly)
-torch-geometric>=2.5
-
+torch==2.8.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+torchvision==0.19.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+torchaudio==2.8.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+torch-geometric==2.6.1
+pyg-lib
+torch-scatter
+torch-sparse
+torch-cluster
+torch-spline-conv
