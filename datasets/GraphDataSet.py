@@ -1,6 +1,7 @@
 from torch_geometric.data import Data, Dataset
 from torch_geometric.utils import dense_to_sparse
 import torch
+import copy
 from utils.TensorUtils import create_normalized_tensor, normalize_power
 
 
@@ -79,9 +80,31 @@ class SupervisedGraphNetDataset(Dataset):
         return data
 
 
-def graph_collate(batch):
+class EstimatedCSIDataset(Dataset):
     """
-    Collate function that prevents PyG from merging graphs into one.
-    Returns a list of individual graphs for batch processing.
+    Wraps a base dataset and stores precomputed H_hat per sample.
+    __getitem__ returns a shallow copy with links_matrix := H_hat and also
+    exposes .links_true (the original H).
     """
-    return batch  # no modification, just return list of Data objects
+    def __init__(self, base_dataset, H_hats, sample_ids):
+        super().__init__()
+        assert len(H_hats) == len(base_dataset) == len(sample_ids)
+        self.base = base_dataset
+        self.H_hats = H_hats
+        self.sample_ids = sample_ids
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, idx):
+        data = self.base[idx]
+        # Make a shallow copy of the Data object (PyG Data has clone(); fallback to constructing a new one if needed)
+        if hasattr(data, "clone"):
+            out = data.clone()
+        else:
+            # If not PyG, assume a simple namespace-like object; adapt as needed.
+            out = copy.copy(data)
+        out.links_true = data.links_matrix
+        out.links_matrix = self.H_hats[idx]
+        out.sample_id = self.sample_ids[idx]
+        return out

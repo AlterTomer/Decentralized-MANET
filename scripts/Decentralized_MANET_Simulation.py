@@ -14,17 +14,23 @@ from models.GraphNetAux import train_chained, validate_chained, tau_linear
 from utils.DataUtils import generate_graph_data
 from utils.TrainUtils import cosine_warm_restart_lambda
 from utils.FilesUtils import save_best_ckpt
-from utils.EstimationUtils import masked_band_variance_from_dataset
+from utils.EstimationUtils import masked_band_variance_from_dataset, precompute_csi_estimates, build_estimate_lookup
 from visualization.GraphingAux import plot_train_valid_loss
 from time import time
 
 # ====== config ======
-# args = parse_args()
-# cfg_path = args.config.resolve()
-# parser = load_ini_config(cfg_path)
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN B_6 L_3 seed_1337 n_12.ini"
-parser = ConfigParser()
-parser.read_file(open(cfg_path))
+try:
+    args = parse_args()
+    cfg_path = args.config.resolve()
+    parser = load_ini_config(cfg_path)
+    print(f"Loaded config from CLI: {cfg_path}")
+
+except Exception as e:
+    print(f"⚠️ Failed to load CLI config ({e}), falling back to default path...")
+    cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN Estimated Rayleigh B_6 L_3 seed_1337.ini"
+    parser = ConfigParser()
+    parser.read_file(open(cfg_path))
+    print(f"Loaded default config: {cfg_path}")
 
 USE_AMP = torch.cuda.is_available()
 # Training Parameters
@@ -87,18 +93,43 @@ dataset = generate_graph_data(
     device='cpu',
 )
 
-# sanity: B matches
-sample0 = dataset[0]
-assert sample0.x.shape[0] == B, f"B mismatch: data {sample0.x.shape[0]} vs config {B}"
 
 # splits
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
 train_set, val_set = random_split(dataset, [train_size, val_size])
-
 train_loader = DataLoader(train_set, batch_size=1, shuffle=True, num_workers=0, pin_memory=True)
 val_loader   = DataLoader(val_set,   batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 
+if est_csi:
+    # Train
+    prior_var = masked_band_variance_from_dataset(train_set)
+    est_train = precompute_csi_estimates(
+        train_set,
+        pilots_M=4,
+        pilot_power=1,
+        prior_var=prior_var,
+        est_noise_std=None,
+        seed=SEED,
+        device=device,
+    )
+    train_est_lookup = build_estimate_lookup(est_train)
+
+    # Validation
+    prior_var = masked_band_variance_from_dataset(val_set)
+    est_val = precompute_csi_estimates(
+        train_set,
+        pilots_M=4,
+        pilot_power=1,
+        prior_var=prior_var,
+        est_noise_std=None,
+        seed=SEED,
+        device=device,
+    )
+    val_est_lookup = build_estimate_lookup(est_val)
+else:
+    train_est_lookup = None
+    val_est_lookup = None
 # ====== model / optim / amp ======
 model = ChainedGNN(num_layers=L, B=B, dropout=DROPOUT, use_jk=True, jk_mode="concat").to(device)
 
@@ -137,43 +168,61 @@ best_ckpt = None
 train_loss_arr = np.zeros(MAX_EPOCHS)
 val_rate_arr = np.zeros(MAX_EPOCHS)
 t0 = time()
-prior_var = masked_band_variance_from_dataset(train_set)
+
 # ====== training loop ======
 for epoch in range(MAX_EPOCHS):
     epoch_tau = tau_linear(epoch, MAX_EPOCHS)
     print(f">>> Epoch {epoch} | tau={epoch_tau}")
     t1 = time()
     # --- train ---
+    # stats = train_chained(
+    #     model,
+    #     train_loader,
+    #     optimizer,
+    #     epoch,
+    #     warmup=supervised_epochs,                 # no supervised warmup in this run
+    #     mono_weight=MONO,                         # set >0.0 to encourage monotonicity
+    #     use_amp=USE_AMP,
+    #     scaler=scaler,
+    #     grad_clip=GRAD_CLIP,
+    #     grad_accum_steps=grad_batch,
+    #     tau=epoch_tau,
+    #     use_csi_estimation=True,
+    #     est_noise_std=None,
+    #     pilots_M=4,
+    #     pilot_power=1,
+    #     prior_var=prior_var,
+    # )
     stats = train_chained(
         model,
-        train_loader,
+        train_loader,          # loader over TRUE-CSI dataset
         optimizer,
         epoch,
-        warmup=supervised_epochs,                 # no supervised warmup in this run
-        mono_weight=MONO,                         # set >0.0 to encourage monotonicity
-        use_amp=USE_AMP,
-        scaler=scaler,
+        use_amp=True,
         grad_clip=GRAD_CLIP,
         grad_accum_steps=grad_batch,
         tau=epoch_tau,
-        use_csi_estimation=True,
-        est_noise_std=None,
-        pilots_M=4,
-        pilot_power=1,
-        prior_var=prior_var,
+        est_dataset=val_est_lookup # or est_ds; pass None for full-CSI training
     )
 
 
     # --- step LR ---
     scheduler.step()
     # --- validation (rate-based) ---
+    # val_stats = validate_chained(
+    #     model,
+    #     val_loader,
+    #     device=device,
+    #     csv_path=None,
+    #     epoch=epoch,
+    #     log_interval=1000,
+    # )
     val_stats = validate_chained(
-        model,
-        val_loader,
-        device=device,
-        csv_path=None,
-        epoch=epoch,
-        log_interval=1000,
+    model,
+    val_loader,
+    device=device,
+    est_dataset=None,
+    verbose=True,
     )
 
     # --- log ---
@@ -184,7 +233,6 @@ for epoch in range(MAX_EPOCHS):
         f"Time {(time() - t1) / 60: .3f} mins"
         f"train_loss={stats['loss']:.6f} | "
         f"val_best={val_stats['best_rate']:.6f} | "
-        f"val_norm_dev={val_stats['max_norm_dev']:.2e}"
     )
 
     # --- track best ---
@@ -208,11 +256,6 @@ for epoch in range(MAX_EPOCHS):
 
 # ====== final evals ======
 print(f'Training time = {(time() - t0) / 60} mins')
-final_raw = validate_chained(model, val_loader, device=device, epoch=MAX_EPOCHS, log_interval=1000)
-
-print(
-    f"Final compare -> raw: {final_raw['best_rate']:.6f} | "
-)
 
 os.chdir(figs_dir)
 plot_train_valid_loss(train_loss_arr, val_rate_arr, filename=f'Train {ckpt_prefix}_{L} layers {B} bands network.png')

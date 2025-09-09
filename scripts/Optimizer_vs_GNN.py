@@ -1,18 +1,25 @@
 import torch
+from configparser import ConfigParser
 from models.models import ChainedGNN
 from utils.DataUtils import generate_graph_data
 from utils.ComparisonUtils import evaluate_across_snr
-from configparser import ConfigParser
+from utils.EstimationUtils import masked_band_variance_from_dataset, precompute_csi_estimates
 from utils.ConfigUtils import parse_args, load_ini_config
 from visualization.GraphingAux import plot_mean_rate_vs_snr
 
 # ====== config ======
-# args = parse_args()
-# cfg_path = args.config.resolve()
-# parser = load_ini_config(cfg_path)
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\comp LinTAU Quadriga B_6 L_3 seed_1337.ini"
-parser = ConfigParser()
-parser.read_file(open(cfg_path))
+try:
+    args = parse_args()
+    cfg_path = args.config.resolve()
+    parser = load_ini_config(cfg_path)
+    print(f"Loaded config from CLI: {cfg_path}")
+
+except Exception as e:
+    print(f"⚠️ Failed to load CLI config ({e}), falling back to default path...")
+    cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\comp B_6 L_3 seed_1337 n_10.ini"
+    parser = ConfigParser()
+    parser.read_file(open(cfg_path))
+    print(f"Loaded default config: {cfg_path}")
 
 USE_AMP = torch.cuda.is_available()
 # Training Parameters
@@ -25,6 +32,7 @@ tx = int(train_params["tx"])
 sigma = float(train_params["sigma"])
 DROPOUT = float(train_params["dropout"])
 num_samples = int(train_params["num samples"])
+est_csi = True if int(train_params["LMMSE estimation"]) == 1 else False
 # Files Parameters
 files_params = parser["Files"]
 try:
@@ -52,6 +60,18 @@ dataset = generate_graph_data(
     channel_path=channel_path,
     device='cpu'
 )
+
+if est_csi:
+    prior_var = masked_band_variance_from_dataset(dataset)
+    dataset = precompute_csi_estimates(
+        dataset,
+        pilots_M=4,
+        pilot_power=1,
+        prior_var=prior_var,
+        est_noise_std=None,
+        seed=SEED,
+        device=device,
+    )
 
 model = ChainedGNN(num_layers=L, B=B, dropout=DROPOUT, use_jk=True, jk_mode="concat").to(device).eval()
 

@@ -285,7 +285,8 @@ def compute_equal_power_bound(dataset, sigma_noise=False):
     sigma = sigma_noise
 
     for data in dataset:
-        device = data.x.device
+        device = torch.device("cuda" if data.is_cuda else "cpu")
+        data = data.to(device)
         adj = data.adj_matrix
         n = adj.shape[0]
         links = data.links_matrix  # shape: [B, n, n]
@@ -296,7 +297,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False):
         rx = data.rx
         p = torch.zeros(B, n, n)
         p = init_equal_power(p, adj)
-        p = normalize_power(p, adj)
+        p = normalize_power(p, adj).to(device)
         paths = find_all_paths(adj, tx, rx)
         if not paths:
             rate_bounds.append(0.0)
@@ -304,7 +305,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False):
         paths = paths_to_tensor(paths, device)
 
         rate = calc_sum_rate(links, p, torch.tensor(sigma, device=device), paths, B)
-        rate_bounds.append(rate)
+        rate_bounds.append(rate.item())
 
     return np.array(rate_bounds), p_arr
 

@@ -1,4 +1,6 @@
 import torch
+from datasets.GraphDataSet import EstimatedCSIDataset
+
 
 @torch.no_grad()
 def lmmse_estimate_masked(
@@ -105,3 +107,79 @@ def masked_band_variance_from_dataset(dataset, use_abs2=True) -> torch.Tensor:
 
     prior_var = (num / den.clamp(min=1)).to(torch.float32)
     return prior_var  # [B]
+
+
+@torch.no_grad()
+def precompute_csi_estimates(
+    dataset,
+    *,
+    pilots_M: int = 1,
+    pilot_power: float = 1.0,
+    prior_var: torch.Tensor | float = 1.0,
+    est_noise_std: float | None = None,
+    seed: int = 0,
+    device: torch.device | None = None,
+):
+    """
+    Build an EstimatedCSIDataset once using your existing lmmse_from_truth_masked(...).
+
+    Inputs:
+      - dataset: your base dataset whose items provide:
+          .links_matrix  (H_true)   [B, n, n] complex or real 2x-channel
+          .adj_matrix    (n, n)     boolean/0-1
+          .sigma         scalar noise std (if est_noise_std is None)
+      - pilots_M, pilot_power, prior_var: LMMSE hyper-parameters
+      - est_noise_std: overrides per-sample data.sigma if provided
+      - seed: deterministic per-sample RNG base
+
+    Output:
+      - EstimatedCSIDataset aligned 1:1 with `dataset`
+    """
+    H_hats = []
+    sids   = []
+
+    # Infer device from the first sample if not provided
+    if device is None and len(dataset) > 0:
+        first = dataset[0]
+        # Try to infer device from links_matrix
+        device = getattr(first.links_matrix, "device", torch.device("cpu"))
+
+    for i in range(len(dataset)):
+        d = dataset[i]
+        H_true = d.links_matrix.to(device)
+        adj    = d.adj_matrix.to(device)
+
+        # Noise variance
+        sigma = float(est_noise_std if est_noise_std is not None else d.sigma)
+        noise_var = sigma ** 2
+
+        # Per-sample deterministic RNG
+        g = torch.Generator(device=device).manual_seed(seed + i)
+
+        H_hat = lmmse_from_truth_masked(
+            H_true=H_true,
+            adj=adj,
+            noise_var=noise_var,
+            prior_var=prior_var,
+            pilots_M=pilots_M,
+            pilot_power=pilot_power,
+            rng=g,
+        ).to(device)
+
+        H_hats.append(H_hat)
+        # Make/keep a stable sample_id for later lookup
+        sid = getattr(d, "sample_id", i)
+        sids.append(int(sid))
+
+    return EstimatedCSIDataset(dataset, H_hats, sids)
+
+def build_estimate_lookup(est_dataset: EstimatedCSIDataset):
+    """
+    Returns a dict: sample_id -> H_hat (on the correct device).
+    Useful when the training loader shuffles.
+    """
+    lookup = {}
+    for i in range(len(est_dataset)):
+        d_est = est_dataset[i]
+        lookup[int(d_est.sample_id)] = d_est.links_matrix
+    return lookup

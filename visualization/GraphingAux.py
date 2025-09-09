@@ -42,6 +42,15 @@ def plot_train_valid_loss(train_loss, valid_rate, filename=False):
 
 
 def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
+    """
+    Benchmark plots of rate vs snr (centralized optimization, decentralized optimization, brute search, equal power)
+
+    Args:
+        snr_db: List of SNR values in dB.
+        results: Results dict of rates for each snr value.
+        save_path: Save path for saving plots, if None just show the plot.
+
+    """
     adam = list(results["centralized"].values())
     gnn = list(results["gnn"].values())
     sbn = list(results["strongest bottleneck"].values())
@@ -50,14 +59,13 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
     plt.figure(figsize=(10, 8))
     plt.plot(snr_db, adam, marker="o", label="Centralized Optimization")
     plt.plot(snr_db, gnn,  marker="s", label="Decentralized Optimization")
-    plt.plot(snr_db, sbn,   marker="^", label="Strongest Bottleneck")
+    plt.plot(snr_db, sbn,   marker="^", label="Brute Search")
     plt.plot(snr_db, ep, marker="+", label="Equal Power")
 
 
     plt.yscale("log")
     plt.xlabel("SNR (dB)", fontsize=14)
     plt.ylabel("Mean Rate", fontsize=14)
-    plt.title("Mean Sum-Rate vs SNR", fontsize=14)
     plt.grid(True, which="both")
     plt.legend(fontsize=14)
     plt.tight_layout()
@@ -68,6 +76,43 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
         plt.close()
     else:
         plt.show()
+
+
+def time_varying_model_compare(snr_db, results, n_big, n_small, save_path=None):
+    """
+    Time varying topologies comparison plots of rate vs snr (models were trained on different topologies, the data is based on one of the topologies)
+
+    Args:
+        snr_db: List of SNR values in dB.
+        results: Results dict of rates for each snr value.
+        n_big: Number of nodes in large topology.
+        n_small: Number of nodes in small topology.
+        save_path: Save path for saving plots, if None just show the plot.
+
+    """
+    big_rates = [results["big"][s] for s in snr_db]
+    small_rates = [results["small"][s] for s in snr_db]
+
+
+    plt.figure(figsize=(10, 8))
+    plt.plot(snr_db, big_rates, marker="o", label=rf"Train $n={n_big}$ → Test $n={n_big}$")
+    plt.plot(snr_db, small_rates,  marker="s", label=rf"Train $n={n_small}$ → Test $n={n_big}$")
+
+    plt.yscale("log")
+    plt.xlabel("SNR (dB)", fontsize=14)
+    plt.ylabel("Mean Rate", fontsize=14)
+    plt.grid(True, which="both")
+    plt.legend(fontsize=14)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+    else:
+        plt.show()
+
+
 
 def visualize_best_paths(adj_matrix, best_paths, links_mat, p_arr, sigma, title="Best Paths in MANET"):
     """
