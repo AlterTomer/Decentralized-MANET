@@ -78,7 +78,7 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
         plt.show()
 
 
-def time_varying_model_compare(snr_db, results, n_big, n_small, save_path=None):
+def time_varying_model_compare_plot(snr_db, results, n_big, n_small, save_path=None):
     """
     Time varying topologies comparison plots of rate vs snr (models were trained on different topologies, the data is based on one of the topologies)
 
@@ -112,7 +112,37 @@ def time_varying_model_compare(snr_db, results, n_big, n_small, save_path=None):
     else:
         plt.show()
 
+def est_true_model_compare_plot(snr_db, results, save_path=None):
+    """
+    True CSI model compared with estimated CSI model plots of rate vs snr (models were trained on different topologies, the data is based on one of the topologies)
 
+    Args:
+        snr_db: List of SNR values in dB.
+        results: Results dict of rates for each snr value.
+        save_path: Save path for saving plots, if None just show the plot.
+
+    """
+    true_rates = [results["true"][s] for s in snr_db]
+    est_rates = [results["est"][s] for s in snr_db]
+
+
+    plt.figure(figsize=(10, 8))
+    plt.plot(snr_db, true_rates, marker="o", label="True CSI")
+    plt.plot(snr_db, est_rates,  marker="s", label="Estimated CSI")
+
+    plt.yscale("log")
+    plt.xlabel("SNR (dB)", fontsize=14)
+    plt.ylabel("Mean Rate", fontsize=14)
+    plt.grid(True, which="both")
+    plt.legend(fontsize=14)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+    else:
+        plt.show()
 
 def visualize_best_paths(adj_matrix, best_paths, links_mat, p_arr, sigma, title="Best Paths in MANET"):
     """

@@ -157,3 +157,119 @@ def time_model_compare(dataset, big_model, small_model, snr_db_list):
             results["small"][snr_db] = float(np.mean(small_rates))
 
     return results
+
+def est_true_model_compare(true_dataset, est_dataset, true_model, est_model, snr_db_list):
+    """
+    Sequential evaluation across a list of SNR values.
+    The goal is to test the generalization of ChainedGNN on estimated channels (compare between model that was trained on estimated channels and a model that was trained on true CSI).
+
+    Args:
+        true_dataset: Dataset based on true CSI (already on CPU or GPU as needed).
+        est_dataset: Dataset based on estimated CSI (already on CPU or GPU as needed).
+        true_model: Trained GNN model on true CSI..
+        est_model: Trained GNN model on estimated CSI.
+        snr_db_list: List of SNR values in dB.
+
+    Returns:
+        dict: { "big": {snr_db: mean_rate}, "small": {snr_db: mean_rate}}
+    """
+    assert true_model.B == est_model.B , "models must have the same B attribute"
+    device = next(true_model.parameters()).device
+    results = {"true": {}, "est": {}}
+
+    # --- True CSI ---
+    vals = []
+    for d in true_dataset:
+        H = d.links_matrix  # [B,n,n], complex
+        A = d.adj_matrix  # [n,n], 0/1
+
+        mask = A.bool()
+        E = int(mask.sum())
+        if E == 0:
+            continue  # or append 0.0, your call
+
+        # Mask across edges for each band -> [B, E]
+        Hr = H.real[:, mask]
+        Hi = H.imag[:, mask]
+
+        # Var per band over edges, then sum Re+Im
+        var_r = Hr.var(dim=1, unbiased=False)
+        var_i = Hi.var(dim=1, unbiased=False)
+        per_band_var = var_r + var_i  # [B]
+
+        vals.append(per_band_var.mean())
+    out = torch.stack(vals).mean()
+    mean_channel_var = out.item()
+
+    for snr_db in snr_db_list:
+        snr = 10.0 ** (snr_db / 10.0)
+        sigma2 = mean_channel_var / snr
+        sigma = sigma2 ** 0.5
+        print(f'true sigma: {sigma}')
+
+        # GNN mean rate
+        true_model.eval()
+        with torch.no_grad():
+            true_rates = []
+            for d in true_dataset:
+                d.sigma = torch.tensor(sigma, device=device)
+                d = d.to(device)
+
+                paths = find_all_paths(d.adj_matrix, d.tx, d.rx)
+                paths = paths_to_tensor(paths, device)
+
+                true_gnn_rates, _ = _compute_rates_per_layer(true_model, d, paths)
+                true_rate  = torch.stack(true_gnn_rates).max().item()
+                true_rates.append(true_rate)
+
+
+            results["true"][snr_db] = float(np.mean(true_rates))
+
+    # --- Estimated CSI ---
+    vals = []
+    for d in est_dataset:
+        H = d.links_matrix  # [B,n,n], complex
+        A = d.adj_matrix  # [n,n], 0/1
+
+        mask = A.bool()
+        E = int(mask.sum())
+        if E == 0:
+            continue  # or append 0.0, your call
+
+        # Mask across edges for each band -> [B, E]
+        Hr = H.real[:, mask]
+        Hi = H.imag[:, mask]
+
+        # Var per band over edges, then sum Re+Im
+        var_r = Hr.var(dim=1, unbiased=False)
+        var_i = Hi.var(dim=1, unbiased=False)
+        per_band_var = var_r + var_i  # [B]
+
+        vals.append(per_band_var.mean())
+    out = torch.stack(vals).mean()
+    mean_channel_var = out.item()
+    for snr_db in snr_db_list:
+        snr = 10.0 ** (snr_db / 10.0)
+        sigma2 = mean_channel_var / snr
+        sigma = sigma2 ** 0.5
+        print(f'est sigma: {sigma}')
+
+        # GNN mean rate
+        est_model.eval()
+        with torch.no_grad():
+            est_rates = []
+            for d in est_dataset:
+                d.sigma = torch.tensor(sigma, device=device)
+                d = d.to(device)
+
+                paths = find_all_paths(d.adj_matrix, d.tx, d.rx)
+                paths = paths_to_tensor(paths, device)
+
+                est_gnn_rates, _ = _compute_rates_per_layer(est_model, d, paths)
+                est_rate  = torch.stack(est_gnn_rates).max().item()
+                est_rates.append(est_rate)
+
+
+            results["est"][snr_db] = float(np.mean(est_rates))
+
+    return results
