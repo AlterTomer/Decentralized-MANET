@@ -19,18 +19,15 @@ from visualization.GraphingAux import plot_train_valid_loss
 from time import time
 
 # ====== config ======
-try:
-    args = parse_args()
-    cfg_path = args.config.resolve()
-    parser = load_ini_config(cfg_path)
-    print(f"Loaded config from CLI: {cfg_path}")
+# args = parse_args()
+# cfg_path = args.config.resolve()
+# parser = load_ini_config(cfg_path)
+# print(f"Loaded config from CLI: {cfg_path}")
 
-except Exception as e:
-    print(f"⚠️ Failed to load CLI config ({e}), falling back to default path...")
-    cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN Estimated Rayleigh B_6 L_3 seed_1337.ini"
-    parser = ConfigParser()
-    parser.read_file(open(cfg_path))
-    print(f"Loaded default config: {cfg_path}")
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\ChainedGNN Estimated Rayleigh B_6 L_3 seed_1337.ini"
+parser = ConfigParser()
+parser.read_file(open(cfg_path))
+print(f"Loaded default config: {cfg_path}")
 
 USE_AMP = torch.cuda.is_available()
 # Training Parameters
@@ -95,9 +92,10 @@ dataset = generate_graph_data(
 
 
 # splits
+g = torch.Generator().manual_seed(SEED)
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
-train_set, val_set = random_split(dataset, [train_size, val_size])
+train_set, val_set = random_split(dataset, [train_size, val_size], generator=g)
 train_loader = DataLoader(train_set, batch_size=1, shuffle=True, num_workers=0, pin_memory=True)
 val_loader   = DataLoader(val_set,   batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 
@@ -118,7 +116,7 @@ if est_csi:
     # Validation
     prior_var = masked_band_variance_from_dataset(val_set)
     est_val = precompute_csi_estimates(
-        train_set,
+        val_set,
         pilots_M=4,
         pilot_power=1,
         prior_var=prior_var,
@@ -175,53 +173,27 @@ for epoch in range(MAX_EPOCHS):
     print(f">>> Epoch {epoch} | tau={epoch_tau}")
     t1 = time()
     # --- train ---
-    # stats = train_chained(
-    #     model,
-    #     train_loader,
-    #     optimizer,
-    #     epoch,
-    #     warmup=supervised_epochs,                 # no supervised warmup in this run
-    #     mono_weight=MONO,                         # set >0.0 to encourage monotonicity
-    #     use_amp=USE_AMP,
-    #     scaler=scaler,
-    #     grad_clip=GRAD_CLIP,
-    #     grad_accum_steps=grad_batch,
-    #     tau=epoch_tau,
-    #     use_csi_estimation=True,
-    #     est_noise_std=None,
-    #     pilots_M=4,
-    #     pilot_power=1,
-    #     prior_var=prior_var,
-    # )
     stats = train_chained(
         model,
         train_loader,          # loader over TRUE-CSI dataset
         optimizer,
         epoch,
+        mono_weight=MONO,
         use_amp=True,
         grad_clip=GRAD_CLIP,
         grad_accum_steps=grad_batch,
         tau=epoch_tau,
-        est_dataset=val_est_lookup # or est_ds; pass None for full-CSI training
+        est_dataset=train_est_lookup # or est_ds; pass None for full-CSI training
     )
 
 
     # --- step LR ---
     scheduler.step()
-    # --- validation (rate-based) ---
-    # val_stats = validate_chained(
-    #     model,
-    #     val_loader,
-    #     device=device,
-    #     csv_path=None,
-    #     epoch=epoch,
-    #     log_interval=1000,
-    # )
     val_stats = validate_chained(
     model,
     val_loader,
     device=device,
-    est_dataset=None,
+    est_dataset=val_est_lookup,
     verbose=True,
     )
 

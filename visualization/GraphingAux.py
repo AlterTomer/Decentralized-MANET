@@ -127,8 +127,8 @@ def est_true_model_compare_plot(snr_db, results, save_path=None):
 
 
     plt.figure(figsize=(10, 8))
-    plt.plot(snr_db, true_rates, marker="o", label="True CSI")
-    plt.plot(snr_db, est_rates,  marker="s", label="Estimated CSI")
+    plt.plot(snr_db, true_rates, marker="o", label="True CSI Model")
+    plt.plot(snr_db, est_rates,  marker="s", label="Estimated CSI Model")
 
     plt.yscale("log")
     plt.xlabel("SNR (dB)", fontsize=14)

@@ -134,3 +134,33 @@ def generate_graph_data(n_list, tx_list, rx_list, sigma_list, B, seed=1000, chan
 
     dataset = GraphNetDataset(adj_list, links_list, tx_list, rx_list, sigma_list, B, device=device)
     return dataset
+
+def mean_var_over_dataset(ds):
+    """
+    Compute the average channel variance across all graphs in a dataset according to the adjacency matrix.
+
+    Args:
+        ds (Dataset): Dataset of graphs. Each graph must contain:
+            - `links_matrix`: torch.Tensor, shape [B, n, n], complex channel matrix.
+            - `adj_matrix`: torch.Tensor, shape [n, n], binary adjacency matrix.
+
+    Returns:
+        float: Mean channel variance across all graphs and frequency bands.
+
+    Raises:
+    ValueError: If no valid edges are found in the dataset.
+
+    """
+    vals = []
+    for d in ds:
+        H, A = d.links_matrix, d.adj_matrix  # H: [B,n,n] complex, A: [n,n]
+        mask = A.bool()
+        E = int(mask.sum())
+        if E == 0:
+            continue
+        Hr, Hi = H.real[:, mask], H.imag[:, mask]  # [B,E]
+        per_band_var = Hr.var(dim=1, unbiased=False) + Hi.var(dim=1, unbiased=False)  # [B]
+        vals.append(per_band_var.mean())  # scalar per graph
+    if not vals:
+        raise ValueError("No edges found; cannot estimate mean channel variance.")
+    return torch.stack(vals).mean().item()  # scalar

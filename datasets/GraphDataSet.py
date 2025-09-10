@@ -98,12 +98,11 @@ class EstimatedCSIDataset(Dataset):
 
     def __getitem__(self, idx):
         data = self.base[idx]
-        # Make a shallow copy of the Data object (PyG Data has clone(); fallback to constructing a new one if needed)
         if hasattr(data, "clone"):
             out = data.clone()
         else:
-            # If not PyG, assume a simple namespace-like object; adapt as needed.
             out = copy.copy(data)
+        out.adj_matrix = data.adj_matrix
         out.links_true = data.links_matrix
         out.links_matrix = self.H_hats[idx]
         out.sample_id = self.sample_ids[idx]
