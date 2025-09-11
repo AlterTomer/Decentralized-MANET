@@ -8,18 +8,16 @@ from utils.ConfigUtils import parse_args, load_ini_config
 from visualization.GraphingAux import plot_mean_rate_vs_snr
 
 # ====== config ======
-try:
-    args = parse_args()
-    cfg_path = args.config.resolve()
-    parser = load_ini_config(cfg_path)
-    print(f"Loaded config from CLI: {cfg_path}")
+# args = parse_args()
+# cfg_path = args.config.resolve()
+# parser = load_ini_config(cfg_path)
+# print(f"Loaded config from CLI: {cfg_path}")
 
-except Exception as e:
-    print(f"⚠️ Failed to load CLI config ({e}), falling back to default path...")
-    cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\comp B_6 L_3 seed_1337 n_10.ini"
-    parser = ConfigParser()
-    parser.read_file(open(cfg_path))
-    print(f"Loaded default config: {cfg_path}")
+
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\comp B_6 L_3 seed_1337.ini"
+parser = ConfigParser()
+parser.read_file(open(cfg_path))
+print(f"Loaded default config: {cfg_path}")
 
 USE_AMP = torch.cuda.is_available()
 # Training Parameters

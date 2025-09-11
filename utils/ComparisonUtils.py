@@ -27,9 +27,7 @@ def evaluate_across_snr(dataset, model, B, snr_db_list):
     results = {"gnn": {} ,"centralized": {}, "strongest bottleneck": {}, "equal power": {}}
 
     # --- compute mean channel variance for noise scaling ---
-    vals = mean_var_over_dataset(dataset)
-    out = torch.stack(vals).mean()
-    mean_channel_var = out.item()
+    mean_channel_var = mean_var_over_dataset(dataset)
 
     for snr_db in snr_db_list:
         snr = 10.0 ** (snr_db / 10.0)
@@ -85,9 +83,7 @@ def time_model_compare(dataset, big_model, small_model, snr_db_list):
     results = {"big": {}, "small": {}}
 
     # --- compute mean channel variance for noise scaling ---
-    vals = mean_var_over_dataset(dataset)
-    out = torch.stack(vals).mean()
-    mean_channel_var = out.item()
+    mean_channel_var = mean_var_over_dataset(dataset)
 
     for snr_db in snr_db_list:
         snr = 10.0 ** (snr_db / 10.0)

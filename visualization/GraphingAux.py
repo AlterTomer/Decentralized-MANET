@@ -122,8 +122,9 @@ def est_true_model_compare_plot(snr_db, results, save_path=None):
         save_path: Save path for saving plots, if None just show the plot.
 
     """
-    true_rates = [results["true"][s] for s in snr_db]
-    est_rates = [results["est"][s] for s in snr_db]
+    eps = 1e-9
+    true_rates = [max(results["true"][s], eps) for s in snr_db]
+    est_rates = [max(results["est"][s], eps) for s in snr_db]
 
 
     plt.figure(figsize=(10, 8))
