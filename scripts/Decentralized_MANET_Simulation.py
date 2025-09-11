@@ -100,6 +100,7 @@ train_loader = DataLoader(train_set, batch_size=1, shuffle=True, num_workers=0, 
 val_loader   = DataLoader(val_set,   batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 
 if est_csi:
+    print("Estimated CSI Model")
     # Train
     prior_var = masked_band_variance_from_dataset(train_set)
     est_train = precompute_csi_estimates(
