@@ -1,4 +1,6 @@
 import torch
+import os
+import pickle
 from configparser import ConfigParser
 from models.models import ChainedGNN
 from utils.DataUtils import generate_graph_data
@@ -88,4 +90,7 @@ small_model.load_state_dict(ckpt["model_state_dict"])
 
 snr_db_list = list(range(-10, 12, 1))
 results = time_model_compare(dataset, big_model, small_model, snr_db_list)
+os.chdir(r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Figures Data")
+with open("scalability_true_Rayleigh_nbig_10_nsmall_8_B_6.pkl", "wb") as file:
+    pickle.dump(results, file)
 time_varying_model_compare_plot(snr_db_list, results, n_big, n_small, save_path=fig_path)

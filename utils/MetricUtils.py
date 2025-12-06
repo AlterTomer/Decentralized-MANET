@@ -21,7 +21,18 @@ def link_rate(h, p, sigma):
     return torch.log2(1 + snr)
 
 
-def calc_sum_rate(h_arr, p_arr, sigma, paths_tensor, B, tau=0.0, eps=1e-12):
+def calc_sum_rate(
+    h_arr,
+    p_arr,
+    sigma,
+    paths_tensor,
+    B,
+    tau: float = 0.0,
+    eps: float = 1e-12,
+    per_band: bool = False,
+    ignore_zero_edges: bool = False,
+    power_threshold: float = 1e-8,
+):
     """
     Fully vectorized sum-rate over all paths and bands.
     Any NaNs/Infs in h_arr/p_arr are treated as zeros (i.e., contribute 0 rate).
@@ -35,147 +46,124 @@ def calc_sum_rate(h_arr, p_arr, sigma, paths_tensor, B, tau=0.0, eps=1e-12):
         B:       int, number of frequency bands.
         tau:     float, if >0 uses soft-min over edges with temperature tau.
         eps:     float, numerical floor.
+        per_band: Boolean, if True return per band rates [R1, R2, ..., RB],
+                  else return mean rate across bands.
+        ignore_zero_edges:
+                  If True, when computing the bottleneck (min) over edges in a path,
+                  only consider edges with p > power_threshold. Edges with
+                  p <= power_threshold are treated like “non-edges” for the min.
+                  Useful for bottleneck baselines with one-hot p.
+        power_threshold:
+                  Threshold for deciding whether an edge is “active”.
 
     Returns:
-        torch.Tensor scalar: average best-path rate across bands.
+        torch.Tensor scalar, or [B] if per_band=True.
     """
     device = h_arr.device
+
+    # Sigma handling
     if not isinstance(sigma, torch.Tensor):
         sigma = torch.tensor(sigma, dtype=torch.float32, device=device)
-    # Ensure sigma is finite & > 0
     sigma = torch.nan_to_num(sigma, nan=1.0, posinf=1.0, neginf=1.0).clamp_min(eps)
 
-    # Sanitize inputs: NaN/Inf -> 0 so they contribute no rate
+    # Sanitize inputs
     h_arr = torch.nan_to_num(h_arr, nan=0.0, posinf=0.0, neginf=0.0)
     p_arr = torch.nan_to_num(p_arr, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
 
     num_paths, _ = paths_tensor.shape
     if num_paths == 0:
+        # No candidate paths at all
         return torch.tensor(0.0, device=device)
 
-    # Edges per path & valid mask
-    edge_start = paths_tensor[:, :-1]
-    edge_end   = paths_tensor[:,  1:]
-    valid_mask = (edge_start >= 0) & (edge_end >= 0)  # [num_paths, path_len-1]
+    # Edges per path & valid mask (topological validity)
+    edge_start = paths_tensor[:, :-1]                       # [num_paths, path_len-1]
+    edge_end   = paths_tensor[:,  1:]                       # [num_paths, path_len-1]
+    valid_mask = (edge_start >= 0) & (edge_end >= 0)        # [num_paths, path_len-1]
 
     # Index for bands
-    B_idx = torch.arange(B, device=device)[:, None, None]  # [B,1,1]
-    es = edge_start.unsqueeze(0).expand(B, -1, -1)         # [B, num_paths, path_len-1]
+    B_idx = torch.arange(B, device=device)[:, None, None]   # [B,1,1]
+    es = edge_start.unsqueeze(0).expand(B, -1, -1)          # [B, num_paths, path_len-1]
     ee = edge_end.unsqueeze(0).expand(B, -1, -1)
 
     # Gather values along path edges
     h_values = h_arr[B_idx, es, ee]     # [B, num_paths, path_len-1], complex
     p_values = p_arr[B_idx, es, ee]     # [B, num_paths, path_len-1], real
 
-    # SNR and per-link rates; sanitize again after ops
+    # SNR and per-link rates
     snr = (h_values.abs() * p_values) ** 2 / (sigma ** 2)
     snr = torch.nan_to_num(snr, nan=0.0, posinf=0.0, neginf=0.0)
-    link_rates = torch.log2(1.0 + snr)
+    link_rates = torch.log2(1.0 + snr)                      # [B, num_paths, path_len-1]
 
-    # Mask padding edges with +inf so min() ignores them; keep valid edges unchanged
-    link_rates = torch.where(
-        valid_mask.unsqueeze(0),
-        link_rates,
-        torch.full_like(link_rates, float('inf'))
-    )
+    # Base mask for "structurally valid" edges (not padding)
+    base_mask = valid_mask.unsqueeze(0)                     # [B, num_paths, path_len-1]
 
-    # Min over edges in each path (hard min or soft-min)
-    if tau and tau > 0.0:
-        # soft-min across edges
-        path_min_rates = (-1.0 / tau) * torch.logsumexp(-tau * link_rates, dim=2)  # [B, num_paths]
+    if ignore_zero_edges:
+        # Only edges that are both valid and have p > threshold are "active" for the min
+        active_mask = base_mask & (p_values > power_threshold)
+
+        # Mask everything else with +inf so min/soft-min ignores them
+        masked_link_rates = torch.where(
+            active_mask,
+            link_rates,
+            torch.full_like(link_rates, float("inf")),
+        )
+
+        if tau and tau > 0.0:
+            # soft-min over active edges
+            path_min_rates = (-1.0 / tau) * torch.logsumexp(-tau * masked_link_rates, dim=2)
+        else:
+            path_min_rates, _ = masked_link_rates.min(dim=2)  # [B, num_paths]
+
+        # Paths with no active edges at all -> set to 0 (so they never beat real paths)
+        all_inactive = ~active_mask.any(dim=2)                # [B, num_paths]
+        path_min_rates = torch.where(
+            all_inactive,
+            torch.zeros_like(path_min_rates),
+            path_min_rates,
+        )
     else:
-        path_min_rates, _ = link_rates.min(dim=2)  # [B, num_paths]
+        # Original behavior: ignore only padding edges, but zero-power edges DO count in the min
+        masked_link_rates = torch.where(
+            base_mask,
+            link_rates,
+            torch.full_like(link_rates, float("inf")),
+        )
 
-    # Best path per band (max over paths), then average across bands
+        if tau and tau > 0.0:
+            path_min_rates = (-1.0 / tau) * torch.logsumexp(-tau * masked_link_rates, dim=2)
+        else:
+            path_min_rates, _ = masked_link_rates.min(dim=2)  # [B, num_paths]
+
+    # Best path per band (max over paths)
     max_path_rates, _ = path_min_rates.max(dim=1)  # [B]
+
+    if per_band:
+        return max_path_rates
     return max_path_rates.mean()
 
 
-def cosine_p(pred_p: torch.Tensor,
-             target_p: torch.Tensor,
-             adj: torch.Tensor,
-             eps: float = 1e-12,
-             reduction: str = 'mean',
-             treat_isolated_as_perfect: bool = True) -> torch.Tensor:
+def objective_single_wrapper(
+    links_mat,
+    P,
+    sigma_noise,
+    paths,
+    B,
+    tau: float = 0.0,
+    eps: float = 1e-12,
+    per_band: bool = False,
+    **kwargs,
+):
     """
-    Per-node cosine loss over rows p[:, i, :], masked by adjacency.
-    Each node i compares its outgoing powers (across bands and neighbors).
-
-    Args:
-        pred_p:   [B, n, n]
-        target_p: [B, n, n]
-        adj:      [n, n] boolean or {0,1}
-        eps:      numerical stability
-        reduction: 'mean' | 'sum' | 'none'
-        treat_isolated_as_perfect: if True, nodes with no outgoing edges contribute 0 loss
-
-    Returns:
-        scalar if reduction != 'none', else [n] per-node losses
+    Wrapper around calc_sum_rate for the single unicast problem.
     """
-    assert pred_p.shape == target_p.shape, "pred/target shapes must match [B,n,n]"
-    B, n, _ = pred_p.shape
+    return calc_sum_rate(
+        h_arr=links_mat,
+        p_arr=P,
+        sigma=sigma_noise,
+        paths_tensor=paths,
+        B=B,
+        tau=tau,
+        eps=eps,
+        per_band=per_band,
+    )
 
-    # Broadcastable mask
-    mask3 = (adj > 0).to(dtype=pred_p.dtype, device=pred_p.device).unsqueeze(0)  # [1,n,n]
-
-    # Masked rows for each node i
-    Pm = pred_p * mask3           # [B,n,n]
-    Tm = target_p * mask3         # [B,n,n]
-
-    # Sum over bands and destination nodes -> per-node scalars
-    # dot_i = <Pm[:,i,:], Tm[:,i,:]> summed over both B and n dims
-    dot = (Pm * Tm).sum(dim=(0, 2))                      # [n]
-    p_norm = torch.sqrt((Pm * Pm).sum(dim=(0, 2)).clamp_min(eps))  # [n]
-    t_norm = torch.sqrt((Tm * Tm).sum(dim=(0, 2)).clamp_min(eps))  # [n]
-
-    # Identify isolated rows (no outgoing edges)
-    deg = adj.sum(dim=1)   # [n]
-    isolated = (deg == 0)
-
-    # Cosine similarity per node
-    # If you want sign-invariance, wrap dot in .abs(); otherwise, leave it raw
-    cos = dot / (p_norm * t_norm)
-    cos = cos.clamp(-1.0, 1.0)
-
-    # Handle isolated rows
-    if treat_isolated_as_perfect:
-        cos = torch.where(isolated.to(cos.device), torch.ones_like(cos), cos)
-    else:
-        # Exclude isolated from reduction by masking later
-        pass
-
-    loss_per_node = 1.0 - cos  # [n]
-
-    if reduction == 'none':
-        return loss_per_node
-    elif reduction == 'sum':
-        if treat_isolated_as_perfect:
-            return loss_per_node.sum()
-        else:
-            valid = (~isolated).to(loss_per_node.dtype).to(loss_per_node.device)
-            return (loss_per_node * valid).sum()
-    else:  # 'mean'
-        if treat_isolated_as_perfect:
-            return loss_per_node.mean()
-        else:
-            valid = (~isolated).to(loss_per_node.dtype).to(loss_per_node.device)
-            denom = valid.sum().clamp_min(1)
-            return (loss_per_node * valid).sum() / denom
-
-def mse_p(pred_P, target_P, normalize=False):
-    """Mean squared error between predicted and target power allocations."""
-    if normalize:
-        num = torch.norm(pred_P - target_P, p='fro') ** 2
-        denom = torch.norm(target_P, p='fro') ** 2 + 1e-12
-        return num / denom
-    else:
-        return torch.mean((pred_P - target_P) ** 2)
-
-
-def hybrid_power_loss(pred_P, target_P, adj, alpha=0.75, normalize_mse=False):
-    """
-    Hybrid loss: alpha * cosine + (1-alpha) * MSE (default unnormalized).
-    """
-    cos_loss = cosine_p(pred_P, target_P, adj)
-    mse_loss = mse_p(pred_P, target_P, normalize=normalize_mse)
-    return alpha * cos_loss + (1 - alpha) * mse_loss

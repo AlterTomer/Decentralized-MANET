@@ -120,9 +120,11 @@ class GatedGCNLayer(MessagePassing):
 
 
 # ------------------------------------------- Chained Net --------------------------------------------------------------
+
 class ChainedGNN(nn.Module):
-    r"""
+    """
     Node-centric Chained GNN for decentralized OFDM MANET power allocation.
+
 
     Overview per sample (variable n, fixed B):
       1) Build node features from P0 ∈ ℝ^{B×n×n}:
@@ -135,35 +137,43 @@ class ChainedGNN(nn.Module):
            - "max": elementwise max over {x^(0), …, x^(ℓ)} → fixed dim = node_hidden
            - "concat": concat[x^(0)||…||x^(ℓ)] then a small Linear projects to node_hidden.
       4) Shared per-edge decoder:
-           dec_in = [ e^(ℓ)_{i→j},  x_i^{JK(ℓ)},  x_j^{JK(ℓ)} ]  → LayerNorm → MLP → Softplus
-           p_edge ∈ ℝ^B, then scatter into dense [B, n, n].
+           dec_in = [ e^(ℓ)_{i→j},  x_i^{JK(ℓ)},  x_j^{JK(ℓ)} ]  → LayerNorm → MLP → Softplus.
 
-    Returns:
-        List[Tensor]: length L; each is a per-band power matrix [B, n, n].
+    Modes:
+      - problem="single":    one Tx→Rx, outputs per layer: [B, n, n]
+      - problem="multicast": shared message to K receivers, outputs per layer: [B, n, n]
+      - problem="multi":     K distinct messages (commodities), outputs per layer: (P[ B,K,n,n ], Z[ B,K,n,n ])
     """
 
     def __init__(self,
                  num_layers: int,
                  B: int,
+                 K: int = 1,
+                 problem: str = "single",     # NEW
                  dropout: float = 0.2,
                  use_jk: bool = True,
                  jk_mode: str = "concat"):
         super().__init__()
         assert jk_mode in ("max", "concat"), "jk_mode must be 'max' or 'concat'"
+        assert problem in {"single", "multicast", "multi"}, "problem must be 'single'|'multicast'|'multi'"
 
         self.B = B
+        self.K = K
+        self.problem = problem        # NEW
         self.num_layers = num_layers
         self.dropout = dropout
         self.use_jk = use_jk
         self.jk_mode = jk_mode
 
         # Trunk dims
-        node_hidden = B          # keep simple & band-aligned
+        node_hidden = B
         edge_hidden = B
-        node_in_dim = 2 * B + 3  # [x_out||x_in||role]
-        edge_in_dim = 2 * B      # CSI: [Re(H_b), Im(H_b)] for b=1..B
+        # roles: per-receiver channels for multicast/multi, 3 channels for single
+        roles_dim = (1 + K + 1) if problem in {"multicast", "multi"} and K > 0 else 3
+        node_in_dim = 2 * B + roles_dim
+        edge_in_dim = 2 * B  # CSI: [Re(H_b), Im(H_b)] for b=1..B
 
-        # GNN trunk (assumes GatedGCNLayer is available in scope or imported at file top)
+        # GNN trunk
         self.layers = nn.ModuleList([
             GatedGCNLayer(
                 node_in_dim=node_in_dim if i == 0 else node_hidden,
@@ -175,7 +185,7 @@ class ChainedGNN(nn.Module):
             for i in range(num_layers)
         ])
 
-        # JK projection heads for "concat" to keep decoder input fixed-size
+        # JK projection heads for "concat"
         if self.use_jk and self.jk_mode == "concat":
             self.jk_projs = nn.ModuleList([
                 nn.Linear((l + 1) * node_hidden, node_hidden) for l in range(num_layers)
@@ -183,70 +193,124 @@ class ChainedGNN(nn.Module):
         else:
             self.jk_projs = None
 
-        # Shared decoder: input is always [edge_hidden + 2*node_hidden]
+        # Decoder
         dec_in_dim = edge_hidden + 2 * node_hidden
-        self.dec_in_norm = nn.LayerNorm(dec_in_dim)  # <-- stabilizes decoder input scale
-        # self.decoder = nn.Sequential(
-        #     nn.Linear(dec_in_dim, B),
-        #     nn.Softplus()  # nonnegative power
-        # )
-        self.head = nn.Linear(dec_in_dim, B)
-        self.out_act = nn.Softplus()
+        self.dec_in_norm = nn.LayerNorm(dec_in_dim)
+
+        # p_head size depends on PROBLEM (not just K):
+        # - single/multicast → B
+        # - multi            → B*K
+        if self.problem == "multi":
+            p_out = B * K
+        else:
+            p_out = B
+        self.p_head = nn.Linear(dec_in_dim, p_out)
+        self.p_act  = nn.Softplus()
+
+        # z_head is only used in multi (K commodities): per-band (K+1)-way (K targets + 1 null)
+        if self.problem == "multi":
+            self.z_head = nn.Linear(dec_in_dim, B * (K + 1))
+            self.z_act  = nn.Softmax(dim=-1)
+        else:
+            self.z_head = None
+            self.z_act  = None
 
     # ---------- feature builder ----------
-    def _build_node_features(self, P0: torch.Tensor, tx_idx=None, rx_idx=None) -> torch.Tensor:
+    def _build_node_features(self, P0: torch.Tensor, tx_idx=None, rx_idx=None, *, per_receiver=False,
+                             K=None) -> torch.Tensor:
         """
-        Build node features from initial power guess and roles.
-
-        Args:
-            P0:     [B, n, n] initial power guess
-            tx_idx: int or None (index of Tx)
-            rx_idx: int or None (index of Rx)
-
-        Returns:
-            x_node: [n, 2B+3] = [sum_out || sum_in || role(Tx,Rx,Relay)]
+        If per_receiver=True, roles dim = (1 + K + 1); else roles dim = 3.
+        K can be inferred from len(rx_idx) if not provided.
         """
         B, n, _ = P0.shape
-        # bandwise outgoing/incoming
-        x_out = P0.sum(dim=2).transpose(0, 1)  # [n, B]
-        x_in  = P0.sum(dim=1).transpose(0, 1)  # [n, B]
+        x_out = P0.sum(dim=2).transpose(0, 1)  # [n,B]
+        x_in = P0.sum(dim=1).transpose(0, 1)  # [n,B]
 
-        # roles one-hot
-        role = torch.zeros(n, 3, device=P0.device, dtype=x_out.dtype)
-        if tx_idx is not None and 0 <= int(tx_idx) < n:
-            role[int(tx_idx), 0] = 1.0
-        if rx_idx is not None and 0 <= int(rx_idx) < n:
-            role[int(rx_idx), 1] = 1.0
-        relay_mask = (role.sum(dim=1, keepdim=True) == 0.0).float()
-        role[:, 2:3] = relay_mask  # third column = Relay
+        if per_receiver:
+            K_model = int(K) if K is not None else self.K
+            role = torch.zeros(n, 1 + K_model + 1, device=P0.device,
+                               dtype=x_out.dtype)  # [Tx, Rx1..RxK_model, Relay]
 
-        return torch.cat([x_out, x_in, role], dim=-1)  # [n, 2B+3]
+            # Tx (always set if valid)
+            if tx_idx is not None and 0 <= int(tx_idx) < n:
+                role[int(tx_idx), 0] = 1.0
 
-    # ---------- forward ----------
+            # Fill up to K_eff receiver channels, leave the rest zero
+            if rx_idx is not None:
+                rx_list = rx_idx if isinstance(rx_idx, (list, tuple)) else [int(rx_idx)]
+                K_eff = min(len(rx_list), K_model)
+                for k, r in enumerate(rx_list[:K_eff]):
+                    r = int(r)
+                    if 0 <= r < n:
+                        role[r, 1 + k] = 1.0
+
+            # Relay = 1 − max over all previous role channels
+            role[:, -1] = (role[:, :-1].max(dim=1).values == 0).float()
+        else:
+            role = torch.zeros(n, 3, device=P0.device, dtype=x_out.dtype)
+            if tx_idx is not None and 0 <= int(tx_idx) < n:
+                role[int(tx_idx), 0] = 1.0
+            if rx_idx is not None:
+                if isinstance(rx_idx, (list, tuple)):
+                    for r in rx_idx:
+                        r = int(r)
+                        if 0 <= r < n:
+                            role[r, 1] = 1.0
+                else:
+                    r = int(rx_idx)
+                    if 0 <= r < n:
+                        role[r, 1] = 1.0
+            role[:, 2] = (role[:, :2].max(dim=1).values == 0).float()
+
+        return torch.cat([x_out, x_in, role], dim=-1)
+
     def forward(self, data):
         """
-        Args (PyG Data):
-            data.x          : [B, n, n] initial power guess
-            data.edge_index : [2, E] directed edges (src, dst)
-            data.edge_attr  : [E, 2B] CSI real/imag per band
-            data.tx, data.rx: optional ints (Tx/Rx indices)
+        Expects:
+          - data.x:
+              * [B, n, n]   for problem in {"single", "multicast"}
+              * [B, K, n, n] for problem == "multi"   (model can ignore its values if unused)
+          - data.K (int), data.tx (int), data.rx (int | list[int])
+          - data.edge_index: [2, E], data.edge_attr: [E, 2B]
 
         Returns:
-            List[Tensor]: length L; each [B, n, n] per-band power for layer ℓ.
+          - single/multicast: List[Tensor], each [B, n, n]
+          - multi:            List[Tuple[Tensor, Tensor]], each (P[ B,K,n,n ], Z[ B,K,n,n ])
         """
         P0, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        B, n, _ = P0.shape
+        problem = self.problem
+        K_eff = self.K
+
+        # Shapes depend on problem:
+        if problem == "multi":
+            assert P0.dim() == 4, "For problem='multi', data.x must be [B,K,n,n]"
+            B, K, n, _ = P0.shape
+            assert K == K_eff, "data.K must match data.x.shape[1]"
+        else:
+            assert P0.dim() == 3, "For problem='single'/'multicast', data.x must be [B,n,n]"
+            B, n, _ = P0.shape
+
         src, dst = edge_index
 
-        # Build initial node features
+        # ---- Build roles (per-receiver for multicast/multi; simple 3-channel for single) ----
         tx_idx = int(data.tx) if hasattr(data, 'tx') else None
-        rx_idx = int(data.rx) if hasattr(data, 'rx') else None
-        x = self._build_node_features(P0, tx_idx=tx_idx, rx_idx=rx_idx)  # [n, 2B+3]
+        rx_idx = getattr(data, 'rx', None)
+        if isinstance(rx_idx, torch.Tensor):
+            rx_idx = rx_idx.view(-1).tolist()
 
+        use_per_receiver = (problem in {"multicast", "multi"}) and (K_eff > 0)
+        x = self._build_node_features(
+            P0 if problem != "multi" else P0.sum(dim=1),  # use [B,n,n]-shaped proxy for sum_out/in (aggregate across K)
+            tx_idx=tx_idx,
+            rx_idx=rx_idx,
+            per_receiver=use_per_receiver,
+            K=K_eff if use_per_receiver else None
+        )
+        # Note: For "multi", we pass a [B,n,n] proxy (sum over K) to keep x_out/x_in semantics consistent.
+
+        # ---- GNN trunk ----
         xs_per_layer, es_per_layer = [], []
         e = edge_attr  # [E, 2B]
-
-        # GNN trunk
         for layer in self.layers:
             x, e = layer(x, edge_index, e)
             x = F.relu(x)
@@ -257,15 +321,16 @@ class ChainedGNN(nn.Module):
             xs_per_layer.append(x)
             es_per_layer.append(e)
 
+        # ---- Decode per layer ----
         outputs = []
         for l in range(self.num_layers):
-            # Node reps (with JK)
+            # JK node reps
             if not self.use_jk:
                 x_src = xs_per_layer[l][src]
                 x_dst = xs_per_layer[l][dst]
             else:
                 if self.jk_mode == "max":
-                    x_stack = torch.stack(xs_per_layer[:l + 1], dim=0)  # [(l+1), n, node_hidden]
+                    x_stack = torch.stack(xs_per_layer[:l + 1], dim=0)
                     x_src = torch.max(x_stack[:, src, :], dim=0).values
                     x_dst = torch.max(x_stack[:, dst, :], dim=0).values
                 else:  # "concat"
@@ -274,16 +339,33 @@ class ChainedGNN(nn.Module):
                     x_src = self.jk_projs[l](x_src_cat)
                     x_dst = self.jk_projs[l](x_dst_cat)
 
-            e_l = es_per_layer[l]
-            dec_in = torch.cat([e_l, x_src, x_dst], dim=-1)
+            e_l   = es_per_layer[l]
+            dec_in = torch.cat([e_l, x_src, x_dst], dim=-1)   # [E, dec_in_dim]
             dec_in = self.dec_in_norm(dec_in)
+            E      = dec_in.size(0)
 
-            # Per-edge powers → scatter to dense
-            p_edge = self.out_act(self.head(dec_in))  # Softplus
-            p_full = P0.new_zeros((B, n, n))
-            p_full[:, src, dst] = p_edge.t()
-            outputs.append(p_full)
+            if problem in {"single", "multicast"}:
+                # ----- single & multicast: output [B,n,n] -----
+                p_edge = self.p_act(self.p_head(dec_in))       # [E, B]
+                p_full = (P0 if P0.dim()==3 else P0.sum(dim=1)).new_zeros((B, n, n))
+                p_full[:, src, dst] = p_edge.t()               # [B,E] → scatter
+                outputs.append(p_full)
+
+            else:
+                # ----- multi-commodity: output (P[ B,K,n,n ], Z[ B,K,n,n ]) -----
+                # P: [E, B*K] → [E,B,K] → scatter to [B,K,n,n]
+                p_edge_bk = self.p_act(self.p_head(dec_in)).view(E, B, K_eff)   # [E,B,K]
+
+                # Z: [E, B*(K+1)] → [E,B,K+1] → softmax over K+1 → take first K
+                z_logits = self.z_head(dec_in).view(E, B, K_eff + 1)            # [E,B,K+1]
+                z_probs  = self.z_act(z_logits)                                 # [E,B,K+1]
+                z_edge_bk = z_probs[..., :K_eff]                                 # [E,B,K]
+
+                p_full = P0.new_zeros((B, K_eff, n, n))
+                z_full = P0.new_zeros((B, K_eff, n, n))
+                p_full[:, :, src, dst] = p_edge_bk.permute(1, 2, 0)             # [B,K,E] → scatter
+                z_full[:, :, src, dst] = z_edge_bk.permute(1, 2, 0)
+
+                outputs.append((p_full, z_full))
 
         return outputs
-
-

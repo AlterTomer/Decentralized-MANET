@@ -1,4 +1,5 @@
 import torch
+import os
 from configparser import ConfigParser
 from models.models import ChainedGNN
 from utils.DataUtils import generate_graph_data
@@ -6,6 +7,8 @@ from utils.ComparisonUtils import est_true_model_compare
 from utils.EstimationUtils import masked_band_variance_from_dataset, precompute_csi_estimates
 from utils.ConfigUtils import parse_args, load_ini_config
 from visualization.GraphingAux import est_true_model_compare_plot
+import pickle
+
 
 # ====== config ======
 # try:
@@ -86,4 +89,7 @@ est_model.load_state_dict(ckpt["model_state_dict"])
 
 snr_db_list = list(range(-10, 12, 1))
 results = est_true_model_compare(true_dataset, est_dataset, true_model, est_model, snr_db_list)
+os.chdir(r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Figures Data")
+with open("true_vs_est_Rayleigh_n_10_B_6.pkl", "wb") as file:
+    pickle.dump(results, file)
 est_true_model_compare_plot(snr_db_list, results, save_path=fig_path)

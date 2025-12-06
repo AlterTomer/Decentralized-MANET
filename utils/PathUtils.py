@@ -1,7 +1,7 @@
 import torch
+from typing import List
 
-
-def find_all_paths(adj_matrix, start, destination):
+def find_all_paths(adj_matrix: torch.Tensor, start: int, destination: int) -> List[List[int]]:
     """
     Finds all paths between two nodes using iterative DFS and returns
     a padded tensor of node indices and path lengths.

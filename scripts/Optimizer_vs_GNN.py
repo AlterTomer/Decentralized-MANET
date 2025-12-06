@@ -1,3 +1,4 @@
+import os
 import torch
 from configparser import ConfigParser
 from models.models import ChainedGNN
@@ -6,6 +7,8 @@ from utils.ComparisonUtils import evaluate_across_snr
 from utils.EstimationUtils import masked_band_variance_from_dataset, precompute_csi_estimates
 from utils.ConfigUtils import parse_args, load_ini_config
 from visualization.GraphingAux import plot_mean_rate_vs_snr
+import pickle
+from torch.utils.data import random_split
 
 # ====== config ======
 # args = parse_args()
@@ -13,8 +16,7 @@ from visualization.GraphingAux import plot_mean_rate_vs_snr
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\comp B_6 L_3 seed_1337.ini"
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicast\comp B_6 L_3 seed_1337 n_6_multicast.ini"
 parser = ConfigParser()
 parser.read_file(open(cfg_path))
 print(f"Loaded default config: {cfg_path}")
@@ -23,6 +25,7 @@ USE_AMP = torch.cuda.is_available()
 # Training Parameters
 train_params = parser["Train Parameters"]
 SEED = int(train_params["SEED"])
+MODE = train_params["mode"]  # "single" | "multicast" | "multi"
 B = int(train_params["B"])
 L = int(train_params["L"])
 n = int(train_params["n"])
@@ -39,13 +42,30 @@ except KeyError:
     channel_path = None
 fig_path = files_params["fig path"]
 model_path = files_params["model path"]
+fig_data_dir = files_params["fig data dir"]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset & model (adapt to your paths)
 n_list = [n] * num_samples
 tx_list = [tx] * num_samples
-rx_list = [n - 1 for n in n_list]
+# rx can be int OR a list in the ini; handle both
+_raw_rx = train_params["rx"].strip()
+if _raw_rx.startswith("[") and _raw_rx.endswith("]"):
+    rx = [int(x) for x in _raw_rx[1:-1].replace(" ", "").split(",") if x]
+elif "," in _raw_rx:
+    rx = [int(x) for x in _raw_rx.replace(" ", "").split(",") if x]
+else:
+    rx = int(_raw_rx)
+
+# replicate rx per sample (int or list)
+if isinstance(rx, list):
+    rx_list = [rx] * num_samples  # each sample may have a list of receivers
+    K_cfg = len(rx)
+else:
+    rx_list = [rx] * num_samples
+    K_cfg = 1
+
 sigma_list = [sigma] * num_samples
 
 dataset = generate_graph_data(
@@ -60,6 +80,7 @@ dataset = generate_graph_data(
 )
 
 if est_csi:
+    print("Using estimated CSI")
     prior_var = masked_band_variance_from_dataset(dataset)
     dataset = precompute_csi_estimates(
         dataset,
@@ -70,14 +91,55 @@ if est_csi:
         seed=SEED,
         device=device,
     )
+else:
+    print("Using True CSI")
 
-model = ChainedGNN(num_layers=L, B=B, dropout=DROPOUT, use_jk=True, jk_mode="concat").to(device).eval()
-
+# Choose K for the model:
+# - single:     K_model = 1
+# - multicast:  K_model = K_cfg (to enable per-receiver role channels; still one shared message)
+# - multi:      K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
+if MODE == "single":
+    K_model = 1
+elif MODE == "multicast":
+    K_model = K_cfg
+elif MODE == "multi":
+    K_model = max(1, K_cfg)
+else:
+    raise ValueError("MODE must be 'single', 'multicast', or 'multi'.")
+model = ChainedGNN(
+    num_layers=L,
+    B=B,
+    K=K_model,
+    problem=MODE,
+    dropout=DROPOUT,
+    use_jk=True,
+    jk_mode="concat"
+).to(device).eval()
 ckpt = torch.load(model_path, map_location=device, weights_only=False)
-model.load_state_dict(ckpt["model_state_dict"])
+
+state_dict = ckpt["model_state_dict"]
+new_state_dict = {}
+
+for k, v in state_dict.items():
+    # remap old names -> new names
+    if k.startswith("head."):
+        new_k = k.replace("head.", "p_head.")
+        new_state_dict[new_k] = v
+    else:
+        new_state_dict[k] = v
+# model.load_state_dict(ckpt["model_state_dict"])
+model.load_state_dict(new_state_dict, strict=False)
+
+
+g = torch.Generator().manual_seed(SEED)
+
+# dataset, val_set = random_split(dataset, [8, 2], generator=g)
 
 snr_db_list = list(range(-10, 12, 1))
-results = evaluate_across_snr(dataset, model, B, snr_db_list)
-plot_mean_rate_vs_snr(snr_db_list, results, save_path=fig_path)
+results = evaluate_across_snr(dataset, model, B, snr_db_list,problem=MODE)
+os.chdir(fig_data_dir)
+with open("benchmark.pkl", "wb") as file:
+    pickle.dump(results, file)
 
+plot_mean_rate_vs_snr(snr_db_list, results, save_path=fig_path)
 

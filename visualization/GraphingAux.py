@@ -20,16 +20,16 @@ def plot_train_valid_loss(train_loss, valid_rate, filename=False):
     fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(10, 6))
     # --- Training Loss ---
     axes[0].plot(epochs, train_loss)
-    axes[0].set_xlabel('Epoch', fontsize=14)
-    axes[0].set_ylabel('Loss', fontsize=14)
-    axes[0].set_title('Train Loss', fontsize=14)
+    axes[0].set_xlabel('Epoch', fontsize=30)
+    axes[0].set_ylabel('Loss', fontsize=30)
+    axes[0].set_title('Train Loss', fontsize=30)
     axes[0].grid(True)
 
     # --- Validation Rate ---
     axes[1].plot(epochs, valid_rate)
-    axes[1].set_xlabel('Epoch', fontsize=14)
-    axes[1].set_ylabel('Rate', fontsize=14)
-    axes[1].set_title('Valid Rate', fontsize=14)
+    axes[1].set_xlabel('Epoch', fontsize=30)
+    axes[1].set_ylabel('Rate', fontsize=30)
+    axes[1].set_title('Valid Rate', fontsize=30)
     axes[1].grid(True)
 
 
@@ -56,23 +56,25 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
     sbn = list(results["strongest bottleneck"].values())
     ep = list(results["equal power"].values())
 
-    plt.figure(figsize=(10, 8))
-    plt.plot(snr_db, adam, marker="o", label="Centralized Optimization")
-    plt.plot(snr_db, gnn,  marker="s", label="Decentralized Optimization")
-    plt.plot(snr_db, sbn,   marker="^", label="Brute Search")
-    plt.plot(snr_db, ep, marker="+", label="Equal Power")
+    plt.figure(figsize=(16, 12))
+    plt.plot(snr_db, adam, marker="o", label="Centralized Optimizer", markersize=12)
+    plt.plot(snr_db, gnn,  marker="s", label="MANET-GNN", linestyle="dashed", markersize=12)
+    plt.plot(snr_db, sbn,   marker="^", label="Best Single Channel", linestyle="dotted", markersize=12)
+    plt.plot(snr_db, ep, marker="+", label="Equal-Split", linestyle="dashdot", markersize=12)
 
 
     plt.yscale("log")
-    plt.xlabel("SNR (dB)", fontsize=14)
-    plt.ylabel("Mean Rate", fontsize=14)
+    plt.xlabel("SNR (dB)", fontsize=30)
+    plt.ylabel("Mean Rate", fontsize=30)
     plt.grid(True, which="both")
-    plt.legend(fontsize=14)
+    plt.legend(fontsize=30)
+    plt.xticks(fontsize=25)
+    plt.yticks(fontsize=25)
     plt.tight_layout()
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(save_path, dpi=450)
         plt.close()
     else:
         plt.show()
@@ -94,20 +96,22 @@ def time_varying_model_compare_plot(snr_db, results, n_big, n_small, save_path=N
     small_rates = [results["small"][s] for s in snr_db]
 
 
-    plt.figure(figsize=(10, 8))
-    plt.plot(snr_db, big_rates, marker="o", label=rf"Train $n={n_big}$ → Test $n={n_big}$")
-    plt.plot(snr_db, small_rates,  marker="s", label=rf"Train $n={n_small}$ → Test $n={n_big}$")
+    plt.figure(figsize=(16, 12))
+    plt.plot(snr_db, big_rates, marker="o", label=r"Train $|\mathcal{V}|=$" + f'{n_big} →' + r'Test $|\mathcal{V}|=$' + f'{n_big}', markersize=12)
+    plt.plot(snr_db, small_rates,  marker="s", label=r"Train $|\mathcal{V}|=$" + f'{n_small} →' + r'Test $|\mathcal{V}|=$' + f'{n_big}', markersize=12, linestyle="dashed")
 
     plt.yscale("log")
-    plt.xlabel("SNR (dB)", fontsize=14)
-    plt.ylabel("Mean Rate", fontsize=14)
+    plt.xlabel("SNR (dB)", fontsize=30)
+    plt.ylabel("Mean Rate", fontsize=30)
     plt.grid(True, which="both")
-    plt.legend(fontsize=14)
+    plt.legend(fontsize=30)
+    plt.xticks(fontsize=25)
+    plt.yticks(fontsize=25)
     plt.tight_layout()
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(save_path, dpi=450)
         plt.close()
     else:
         plt.show()
@@ -127,20 +131,22 @@ def est_true_model_compare_plot(snr_db, results, save_path=None):
     est_rates = [max(results["est"][s], eps) for s in snr_db]
 
 
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(16, 12))
     plt.plot(snr_db, true_rates, marker="o", label="True CSI Model")
     plt.plot(snr_db, est_rates,  marker="s", label="Estimated CSI Model")
 
     plt.yscale("log")
-    plt.xlabel("SNR (dB)", fontsize=14)
-    plt.ylabel("Mean Rate", fontsize=14)
+    plt.xlabel("SNR (dB)", fontsize=30)
+    plt.ylabel("Mean Rate", fontsize=30)
     plt.grid(True, which="both")
-    plt.legend(fontsize=14)
+    plt.legend(fontsize=30)
+    plt.xticks(fontsize=25)
+    plt.yticks(fontsize=25)
     plt.tight_layout()
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(save_path, dpi=450)
         plt.close()
     else:
         plt.show()
@@ -173,7 +179,7 @@ def visualize_best_paths(adj_matrix, best_paths, links_mat, p_arr, sigma, title=
                 edges.append((i, j))
 
     pos = nx.spring_layout(G, seed=42)  # Compute node positions
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(16, 12))
 
     # Draw base graph with light gray edges
     nx.draw(G, pos, with_labels=True, node_color="lightblue", edge_color="gray", width=0.5, node_size=500, font_size=10)

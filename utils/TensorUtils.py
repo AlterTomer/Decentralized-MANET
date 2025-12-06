@@ -25,44 +25,50 @@ def create_normalized_tensor(m, n, mask=None, device=None):
     return normalized_A
 
 
-def normalize_power(p_arr, adj, eps=1e-12):
-    """ Projects a power allocation matrix onto the constraint set:
-    - For each row (i.e., each node), L2 norm of outgoing powers (masked by adjacency) <= 1.
-     - Ensures stability for disconnected nodes by clamping norms.
-      Args: p_arr (torch.Tensor): [B, n, n] power allocation tensor.
-      adj (torch.Tensor): [n, n] binary adjacency matrix.
-      eps (float): Small value to prevent division by zero.
-    Returns: torch.Tensor: Normalized power allocation tensor.
+def normalize_power(p_arr: torch.Tensor, adj: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """
+    Project power allocation onto a per-node L2 ball (≤ 1), masked by adjacency.
 
-    B, n, _ = p_arr.shape
+    Supported shapes:
+      • [B, n, n]       (bands, src, dst)
+      • [B, K, n, n]    (bands, commodities, src, dst)
+
+    Semantics: For each node i, the L2 norm of *all outgoing* powers
+    across all active (band × [commodity] × neighbors) is ≤ 1.
+
+    Args:
+        p_arr: Tensor [B,n,n] or [B,K,n,n].
+        adj:   Tensor [n,n] binary adjacency.
+        eps:   Small floor to avoid division by zero.
+
+    Returns:
+        Tensor with the same shape as p_arr, row-wise scaled per source node.
+    """
     device = p_arr.device
+    adj_mask = adj.bool().to(device)  # [n,n]
 
-    # Create adjacency mask [n, n] → [n, B * n] → match p_flat shape
-    mask = adj.bool().to(device)
-    mask_f = mask.repeat(B, 1).T.reshape(n, B * n).float()
+    if p_arr.dim() == 3:
+        B, n, _ = p_arr.shape
+        mask_f = adj_mask.repeat(B, 1).T.reshape(n, B * n).float()
+        p_flat = p_arr.permute(1, 0, 2).reshape(n, B * n)  # [n, B*n]
+        p_masked = p_flat * mask_f
+        norms = p_masked.norm(p=2, dim=1, keepdim=True).clamp_min(eps)
+        scale = torch.minimum(torch.ones_like(norms), 1.0 / norms)
+        p_proj = (p_masked * scale) * mask_f
+        return p_proj.reshape(n, B, n).permute(1, 0, 2).contiguous()
 
-    # Flatten [B, n, n] to [n, B * n] so each row is outgoing power for a node across batches
-    p_flat = p_arr.permute(1, 0, 2).reshape(n, B * n)
+    elif p_arr.dim() == 4:
+        B, K, n, _ = p_arr.shape
+        mask_f = adj_mask.repeat(B * K, 1).T.reshape(n, B * K * n).float()
+        p_flat = p_arr.permute(2, 0, 1, 3).reshape(n, B * K * n)  # [n, B*K*n]
+        p_masked = p_flat * mask_f
+        norms = p_masked.norm(p=2, dim=1, keepdim=True).clamp_min(eps)
+        scale = torch.minimum(torch.ones_like(norms), 1.0 / norms)
+        p_proj = (p_masked * scale) * mask_f
+        return p_proj.reshape(n, B, K, n).permute(1, 2, 0, 3).contiguous()
 
-    # Apply mask
-    p_masked = p_flat * mask_f
-
-    # Compute L2 norm per row (with clamping to avoid div/0)
-    norms = p_masked.norm(p=2, dim=1, keepdim=True)  # [n, 1]
-    norms_clamped = norms.clamp(min=eps)
-
-    # Scale down only if norm > 1
-    scale = torch.minimum(torch.ones_like(norms), 1.0 / norms_clamped)
-
-    # Apply scaling
-    p_projected = p_masked * scale
-
-    # Zero out any values not in adjacency (safety, in case scale * eps ≠ 0)
-    p_projected = p_projected * mask_f
-
-    # Reshape back to [B, n, n]
-    return p_projected.reshape(n, B, n).permute(1, 0, 2).contiguous()
+    else:
+        raise ValueError(f"normalize_power: unsupported p_arr.dim() = {p_arr.dim()} (expected 3 or 4)")
 
 
 def init_equal_power(p, adj):

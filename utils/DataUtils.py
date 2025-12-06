@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import mat73
+import networkx as nx
 
 from datasets.GraphDataSet import GraphNetDataset
 
@@ -90,7 +91,7 @@ def generate_graph_and_channel_matrices(n, B, directed=False, mu: float = 0.0, s
     return adj_matrix, torch.stack(channel_matrix_arr)
 
 
-def generate_graph_data(n_list, tx_list, rx_list, sigma_list, B, seed=1000, channel_path=None, channel_key='channels', device='cpu'):
+def generate_graph_data(n_list, tx_list, rx_list, sigma_list, B, K=1, seed=1000, problem='single',channel_path=None, device='cpu'):
     """
     Generates a dataset of graphs and associated channel matrices.
 
@@ -100,9 +101,10 @@ def generate_graph_data(n_list, tx_list, rx_list, sigma_list, B, seed=1000, chan
         rx_list (List[int]): List of receiver node indices for each sample.
         sigma_list (List[float]): Noise variances per graph.
         B (int): Number of frequency bands.
-        seed (int): Starter seed for data generation
+        K (int): Number of active receivers.
+        seed (int): Starter seed for data generation.
+        problem(str): Optimization problem type - 'single', 'multicast', 'multi'.
         channel_path (str): Optional path to .mat file containing precomputed channels.
-        channel_key (str): Key used to load channels from .mat.
         device : Target device (cpu or cuda).
 
     Returns:
@@ -132,7 +134,7 @@ def generate_graph_data(n_list, tx_list, rx_list, sigma_list, B, seed=1000, chan
             adj_list.append(adj)
             links_list.append(links)
 
-    dataset = GraphNetDataset(adj_list, links_list, tx_list, rx_list, sigma_list, B, device=device)
+    dataset = GraphNetDataset(adj_list, links_list, tx_list, rx_list, sigma_list, B, K=K, problem=problem, device=device)
     return dataset
 
 def mean_var_over_dataset(ds):
@@ -163,4 +165,55 @@ def mean_var_over_dataset(ds):
         vals.append(per_band_var.mean())  # scalar per graph
     if not vals:
         raise ValueError("No edges found; cannot estimate mean channel variance.")
-    return torch.stack(vals).mean().item()  # scalar
+    return torch.stack(vals).mean().item()
+
+
+def adj_to_nx(adj: torch.Tensor, directed: bool = False, weighted: bool = False, symmetrize: bool = True):
+    """
+    Convert a torch adjacency matrix (n x n) to a NetworkX graph.
+    - directed=False: returns an undirected Graph
+    - weighted=True: store nonzero adj[u,v] as edge weight
+    - symmetrize=True (for undirected): use max(adj, adj.T) before building
+    """
+    if adj.dim() != 2 or adj.size(0) != adj.size(1):
+        raise ValueError("adj must be square (n x n).")
+    A = adj.detach().cpu()
+
+    if directed:
+        G = nx.DiGraph()
+        # keep all nonzero entries
+        rows, cols = (A != 0).nonzero(as_tuple=True)
+        for u, v in zip(rows.tolist(), cols.tolist()):
+            if u == v:
+                continue
+            if weighted:
+                G.add_edge(u, v, weight=float(A[u, v]))
+            else:
+                G.add_edge(u, v)
+    else:
+        if symmetrize:
+            A = torch.maximum(A, A.T)
+        G = nx.Graph()
+        rows, cols = torch.triu(A != 0, diagonal=1).nonzero(as_tuple=True)
+        for u, v in zip(rows.tolist(), cols.tolist()):
+            if weighted:
+                w = float(A[u, v])
+                if w != 0.0:
+                    G.add_edge(u, v, weight=w)
+            else:
+                G.add_edge(u, v)
+
+    n = A.size(0)
+    G.add_nodes_from(range(n))
+    return G
+
+
+def graph_diameter_nx(G: nx.Graph) -> int:
+    """
+    Compute the diameter of a graph using NetworkX.
+    G: networkx.Graph (undirected or directed)
+    Returns: int, diameter of the graph
+    """
+    if not nx.is_connected(G.to_undirected()):
+        return -1
+    return nx.diameter(G)
