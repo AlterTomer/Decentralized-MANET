@@ -836,7 +836,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
                 paths_k=paths_k,
                 tau_min=0.0,
                 tau_max=0.0,
-                reduce="sum",
+                reduce="mean",
                 per_band=False,
                 outage_as_neg_inf=False,
             )

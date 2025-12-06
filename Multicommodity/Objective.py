@@ -67,7 +67,7 @@ def objective_multicommodity(
     *,
     tau_min: float = 0.0,
     tau_max: float = 0.0,
-    reduce: str = "sum",
+    reduce: str = "mean",
     per_band: bool = False,
     outage_as_neg_inf: bool = False,
     ignore_zero_edges: bool = False,

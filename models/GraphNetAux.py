@@ -81,7 +81,7 @@ def _compute_rates_per_layer(
                 paths_k=paths_k,
                 tau_min=tau_min,
                 tau_max=tau_max,
-                reduce="sum",
+                reduce="mean",
                 per_band=False,
             )
             p_list.append(P_norm)
@@ -509,7 +509,7 @@ def validate_chained(
                     r = objective_multicommodity(
                         h=H_true, p=P, z=Z, sigma=data.sigma, adj=data.adj_matrix,
                         paths_k=paths_k, tau_min=0.0, tau_max=0.0,
-                        reduce="sum", per_band=False
+                        reduce="mean", per_band=False
                     )
                 rates_true_list.append(r)
 

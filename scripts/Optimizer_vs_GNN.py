@@ -133,9 +133,7 @@ model.load_state_dict(new_state_dict, strict=False)
 
 g = torch.Generator().manual_seed(SEED)
 
-# dataset, val_set = random_split(dataset, [8, 2], generator=g)
-
-snr_db_list = list(range(-10, 12, 1))
+snr_db_list = list(range(-10, 11, 1))
 results = evaluate_across_snr(dataset, model, B, snr_db_list,problem=MODE)
 os.chdir(fig_data_dir)
 with open("benchmark.pkl", "wb") as file:
