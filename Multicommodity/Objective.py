@@ -8,16 +8,16 @@ def edge_rates_multicommodity(h: torch.Tensor,
                               adj: torch.Tensor,
                               eps: float = 1e-12) -> torch.Tensor:
     """
-    Compute per-edge rates R^{(b,k)}_{i->j}(P,Z)
+        Compute per-edge rates R^{(b,k)}_{i->j}(P,Z)
         SNR^{(b,k)}_{i->j} = (|h^{(b)}_{i->j}|^2 * p^{(b,k)}_{i->j}^2 * z^{(b,k)}_{i->j}) / sigma_b^2
 
     Args:
-        h:     [B, n, n] complex channel gains.
-        p:     [B, K, n, n] nonnegative amplitudes.
-        z:     [B, K, n, n] activations in [0,1] (soft or hard).
+        h: [B, n, n] complex channel gains.
+        p: [B, K, n, n] non-negative amplitudes.
+        z: [B, K, n, n] activations in [0,1] (soft or hard).
         sigma: float or [B] noise std per band.
-        adj:   [n, n] {0,1} adjacency (1 = edge exists).
-        eps:   small positive for numerical safety.
+        adj: [n, n] {0,1} adjacency (1 = edge exists).
+        eps: small positive for numerical safety.
 
     Returns:
         R: [B, K, n, n] real, masked by adj (0 on nonexistent edges).
@@ -31,10 +31,12 @@ def edge_rates_multicommodity(h: torch.Tensor,
     adj_mask = (adj != 0).to(device=device, dtype=torch.float32)  # [n,n]
 
     # |h|^2 and mask
-    h_abs2 = torch.nan_to_num(h, nan=0.0+0.0j).abs().pow(2).to(torch.float32)  # [B,n,n]
+    h_abs2 = torch.nan_to_num(h, nan=0.0).abs().pow(2).to(torch.float32)  # [B,n,n]
     h_abs2 = h_abs2 * adj_mask  # [B,n,n]
 
     # Powers and activations
+    p = p.to(torch.float32)
+    z = z.to(torch.float32)
     p2 = torch.nan_to_num(p, nan=0.0).clamp_min(0.0).pow(2)  # [B,K,n,n]
     zc = torch.nan_to_num(z, nan=0.0).clamp(0.0, 1.0)  # [B,K,n,n]
 
@@ -74,23 +76,23 @@ def objective_multicommodity(
     power_threshold: float = 1e-8,
 ) -> torch.Tensor:
     """
-    Multi-commodity objective:
+        Multicommodity objective:
 
-        J(P,Z) = sum_b sum_k max_{path ∈ Φ_{b,k}} min_{(i→j) ∈ path} R^{(b,k)}_{i→j}(P,Z),
+        J(P, Z) = sum_b sum_k max_{path ∈ Φ_{b,k}} min_{(i→j) ∈ path} R^{(b,k)}_{i→j}(P,Z),
 
-    with optional soft-min (tau_min) over edges and soft-max (tau_max) over paths.
+        with optional soft-min (tau_min) over edges and soft-max (tau_max) over paths.
 
     Args:
-        h:      [B, n, n] complex channels.
-        p:      [B, K, n, n] real, nonnegative amplitudes/powers.
-        z:      [B, K, n, n] (or whatever shape edge_rates_multicommodity expects).
+        h: [B, n, n] complex channels.
+        p: [B, K, n, n] real, non-negative amplitudes/powers.
+        z: [B, K, n, n] (or whatever shape edge_rates_multicommodity expects).
         sigma:  noise std, broadcastable.
-        adj:    [n, n] adjacency.
+        adj: [n, n] adjacency.
         paths_k: list of length K; paths_k[k] is a [P_k, L] tensor of node indices
                  (with -1 padding).
         tau_min: >0 for soft-min over edges in a path; 0 for hard min.
         tau_max: >0 for soft-max over paths; 0 for hard max.
-        reduce:  "sum" or "mean" across commodities and bands.
+        reduce: "sum" or "mean" across commodities and bands.
         per_band: if True, return [B]; else scalar.
         outage_as_neg_inf:
                  If True, commodities with no paths (or degenerate paths) are set to -inf.
@@ -98,10 +100,10 @@ def objective_multicommodity(
                  If True, when computing the bottleneck (min) over edges in a path,
                  only consider edges with p > power_threshold. Edges with
                  p <= power_threshold are treated like “non-edges” for the min.
-                 This is useful for bottleneck baselines where p is one-hot and
+                 This is useful for bottleneck baselines where p is one-hot, and
                  we want the bottleneck over the actually powered edges.
         power_threshold:
-                 Threshold for deciding whether an edge is “active”.
+                 Threshold for deciding whether an edge is “active.”
 
     Returns:
         If per_band=False:
@@ -113,6 +115,9 @@ def objective_multicommodity(
     R = edge_rates_multicommodity(h, p, z, sigma, adj)
     B, K, n, _ = R.shape
     device = R.device
+
+    p = p.to(torch.float32)
+    z = z.to(torch.float32)
 
     r_bk = torch.zeros(B, K, device=device)  # per-band, per-commodity
 
@@ -226,7 +231,7 @@ def objective_multicommodity_wrapper(
     **kwargs,
 ):
     """
-    Wrapper around objective_multicommodity for the 1→K multi-commodity problem.
+    Wrapper around objective_multicommodity for the 1→K multicommodity problem.
     Expects:
       - links_mat: h, shape [B, n, n] (or [B, K, n, n] if you designed it so)
       - P:         p, shape [B, K, n, n]
@@ -235,9 +240,9 @@ def objective_multicommodity_wrapper(
       - adj_mat:   adjacency [n, n]
     """
     if Z is None:
-        raise ValueError("objective_multicommodity_wrapper: Z must be provided for multi-commodity.")
+        raise ValueError("objective_multicommodity_wrapper: Z must be provided for multicommodity.")
     if adj_mat is None:
-        raise ValueError("objective_multicommodity_wrapper: adj_mat must be provided for multi-commodity.")
+        raise ValueError("objective_multicommodity_wrapper: adj_mat must be provided for multicommodity.")
 
     return objective_multicommodity(
         h=links_mat,
@@ -248,7 +253,7 @@ def objective_multicommodity_wrapper(
         paths_k=paths_k,
         tau_min=tau_min,
         tau_max=tau_max,
-        reduce="sum",
+        reduce="mean",
         per_band=per_band,
         outage_as_neg_inf=False,
     )

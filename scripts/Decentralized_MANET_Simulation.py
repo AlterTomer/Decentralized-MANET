@@ -36,7 +36,7 @@ from time import time
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicast\ChainedGNN B_6 L_3 seed_1337_n_6_multicast.ini"
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\ChainedGNN B_6 L_3 seed_1337_n_6_multicommodity.ini"
 parser = ConfigParser()
 parser.read_file(open(cfg_path))
 print(f"Loaded default config: {cfg_path}")

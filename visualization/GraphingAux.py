@@ -55,12 +55,14 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
     gnn = list(results["gnn"].values())
     sbn = list(results["strongest bottleneck"].values())
     ep = list(results["equal power"].values())
+    gp = list(results["greedy maxlink"].values())
 
     plt.figure(figsize=(16, 12))
     plt.plot(snr_db, adam, marker="o", label="Centralized Optimizer", markersize=12)
     plt.plot(snr_db, gnn,  marker="s", label="MANET-GNN", linestyle="dashed", markersize=12)
     plt.plot(snr_db, sbn,   marker="^", label="Best Single Channel", linestyle="dotted", markersize=12)
     plt.plot(snr_db, ep, marker="+", label="Equal-Split", linestyle="dashdot", markersize=12)
+    plt.plot(snr_db, gp, marker="*", label="Greedy-Split", linestyle='densely dashed', markersize=12)
 
 
     plt.yscale("log")

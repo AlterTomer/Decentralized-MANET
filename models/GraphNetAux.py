@@ -525,6 +525,6 @@ def validate_chained(
 
     avg_best = (total_best / count) if count > 0 else 0.0
     if verbose:
-        print(f"[VAL][{mode}] best_rate={avg_best:.6f} (TRUE CSI)")
+        print(f"[VAL][{mode}] best_rate={avg_best:.6f}")
 
     return {"best_rate": avg_best}

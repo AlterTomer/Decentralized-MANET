@@ -850,6 +850,210 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
     return np.array(rate_bounds), p_store
 
 
+def _greedy_maxlink_P_single_or_multicast(h, adj):
+    """
+    Build greedy P for SINGLE/MULTICAST problems.
+
+    h:   [B, n, n] complex (or complex-like) tensor
+    adj: [n, n] adjacency (0/1)
+    Returns:
+      P: [B, n, n] float tensor where for each transmitter i:
+           choose (b*, j*) = argmax |h[b,i,j]|^2 over feasible neighbors j!=i,
+           set P[b*, i, j*] = 1, else 0.
+    """
+    device = h.device
+    B, n, _ = h.shape
+
+    # |h|^2
+    if torch.is_complex(h):
+        hpow = h.abs().pow(2)
+    else:
+        # If you store real/imag separately, adapt this.
+        raise TypeError("links_matrix must be complex dtype for this benchmark (or adapt |h|^2 computation).")
+
+    # Feasible mask: adjacency and no self-loops
+    mask = (adj > 0).to(device)
+    mask.fill_diagonal_(False)  # no self loops
+
+    # Expand to [B,n,n]
+    mask_B = mask.unsqueeze(0).expand(B, -1, -1)
+
+    # Infeasible -> -inf for argmax
+    scores = hpow.masked_fill(~mask_B, float("-inf"))
+
+    P = torch.zeros((B, n, n), device=device)
+
+    for i in range(n):
+        flat = scores[:, i, :].reshape(-1)  # [B*n]
+        if torch.isneginf(flat).all():
+            # isolated node (no outgoing links): leave zeros
+            continue
+        k = torch.argmax(flat).item()
+        b_star = k // n
+        j_star = k % n
+        P[b_star, i, j_star] = 1.0
+
+    return P
+
+
+def _greedy_maxlink_P_multi(h, adj, K):
+    """
+    Build greedy P for MULTI-COMMODITY problem.
+
+    Your multicommodity objective expects P shape [B, K, n, n].
+
+    Interpretation choice (reasonable default):
+    - Each commodity k gets its own greedy allocation (same rule), i.e.,
+      for each k and each node i pick the strongest (b,j) and set P[b,k,i,j]=1.
+
+    Then we pass through normalize_power(P, adj) to enforce the project’s power constraints.
+    """
+    device = h.device
+    B, n, _ = h.shape
+
+    # Build per-commodity greedy allocations
+    P = torch.zeros((B, K, n, n), device=device)
+    for k in range(K):
+        P[:, k] = _greedy_maxlink_P_single_or_multicast(h, adj)
+
+    return P
+
+
+def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
+    """
+    Greedy max-link baseline:
+
+    For each node i, among all feasible outgoing links across all B bands and neighbors,
+    pick the single link with maximal |h|^2 and allocate all power (1) to it.
+
+    - SINGLE:    P is [B,n,n], rate=calc_sum_rate
+    - MULTICAST: P is [B,n,n], rate=objective_multicast
+    - MULTI:     P is [B,K,n,n], rate=objective_multicommodity
+
+    Use normalize_power(P, adj) for consistency with your other baselines.
+    """
+    rate_bounds = []
+    p_store = []
+
+    for data in dataset:
+        device = data.links_matrix.device
+        data = data.to(device)
+
+        adj = data.adj_matrix
+        h = data.links_matrix  # [B,n,n]
+        B = data.B if hasattr(data, "B") else h.shape[0]
+        n = adj.shape[0]
+
+        sigma = data.sigma if (sigma_noise is False) else sigma_noise
+
+        # --------------------------
+        # SINGLE
+        # --------------------------
+        if problem == "single":
+            paths = find_all_paths(adj.cpu(), data.tx, data.rx)
+            if not paths:
+                rate_bounds.append(0.0)
+                continue
+            paths = paths_to_tensor(paths, device)
+
+            P = _greedy_maxlink_P_single_or_multicast(h, adj)     # [B,n,n]
+            P = normalize_power(P, adj).to(device)
+
+            rate = calc_sum_rate(
+                h_arr=h,
+                p_arr=P,
+                sigma=torch.tensor(sigma, device=device),
+                paths_tensor=paths,
+                B=B,
+                tau=0.0,
+                eps=1e-12,
+                per_band=False
+            )
+            rate_bounds.append(rate.item())
+            p_store.append(P.detach())
+            continue
+
+        # --------------------------
+        # MULTICAST
+        # --------------------------
+        if problem == "multicast":
+            rx_list = data.rx
+            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
+                rx_list = rx_list[0]
+
+            subgraphs = find_multicast_subgraphs(adj.cpu(), data.tx, rx_list)
+            if (subgraphs is None) or (len(subgraphs) == 0):
+                rate_bounds.append(0.0)
+                continue
+
+            subgraphs_per_band = [subgraphs for _ in range(B)]
+
+            P = _greedy_maxlink_P_single_or_multicast(h, adj)     # [B,n,n]
+            P = normalize_power(P, adj).to(device)
+
+            rate = objective_multicast(
+                h=h,
+                p=P,
+                sigma=torch.tensor(sigma, device=device),
+                adj=adj,
+                subgraphs_per_band=subgraphs_per_band,
+                tau_min=0.0,
+                tau_max=0.0,
+                per_band=False,
+                eps=1e-12,
+            )
+            rate_bounds.append(rate.item())
+            p_store.append(P.detach())
+            continue
+
+        # --------------------------
+        # MULTI-COMMODITY
+        # --------------------------
+        if problem == "multi":
+            rx_list = data.rx
+            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
+                rx_list = rx_list[0]
+            K = len(rx_list)
+
+            paths_k = []
+            has_path = False
+            for rx_k in rx_list:
+                pk = find_all_paths(adj.cpu(), data.tx, rx_k)
+                paths_k.append(paths_to_tensor(pk, device) if pk else torch.empty((0,0), device=device, dtype=torch.long))
+                if pk:
+                    has_path = True
+
+            if not has_path:
+                rate_bounds.append(0.0)
+                continue
+
+            P = _greedy_maxlink_P_multi(h, adj, K)  # [B,K,n,n]
+            P = normalize_power(P, adj).to(device)
+
+            Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, K, n, n).to(device)
+
+            rate = objective_multicommodity(
+                h=h,
+                p=P,
+                z=Z,
+                sigma=torch.tensor(sigma, device=device),
+                adj=adj,
+                paths_k=paths_k,
+                tau_min=0.0,
+                tau_max=0.0,
+                reduce="mean",
+                per_band=False,
+                outage_as_neg_inf=False,
+            )
+            rate_bounds.append(rate.item())
+            p_store.append((P.detach(), Z.detach()))
+            continue
+
+        raise ValueError(f"Unknown problem='{problem}'")
+
+    return np.array(rate_bounds), p_store
+
+
 
 
 

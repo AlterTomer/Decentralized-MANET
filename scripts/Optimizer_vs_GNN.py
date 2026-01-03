@@ -16,7 +16,7 @@ from torch.utils.data import random_split
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicast\comp B_6 L_3 seed_1337 n_6_multicast.ini"
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\comp B_6 L_3 seed_5337_ K_2_multicommodity.ini"
 parser = ConfigParser()
 parser.read_file(open(cfg_path))
 print(f"Loaded default config: {cfg_path}")
@@ -42,7 +42,7 @@ except KeyError:
     channel_path = None
 fig_path = files_params["fig path"]
 model_path = files_params["model path"]
-fig_data_dir = files_params["fig data dir"]
+fig_data_path = files_params["fig data path"]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -74,6 +74,8 @@ dataset = generate_graph_data(
     rx_list=rx_list,
     sigma_list=sigma_list,
     B=B,
+    K=K_cfg,
+    problem=MODE,
     seed=SEED,
     channel_path=channel_path,
     device='cpu'
@@ -89,7 +91,7 @@ if est_csi:
         prior_var=prior_var,
         est_noise_std=None,
         seed=SEED,
-        device=device,
+        device=torch.device('cpu'),
     )
 else:
     print("Using True CSI")
@@ -133,10 +135,9 @@ model.load_state_dict(new_state_dict, strict=False)
 
 g = torch.Generator().manual_seed(SEED)
 
-snr_db_list = list(range(-10, 11, 1))
+snr_db_list = list(range(0, 21, 1))
 results = evaluate_across_snr(dataset, model, B, snr_db_list,problem=MODE)
-os.chdir(fig_data_dir)
-with open("benchmark.pkl", "wb") as file:
+with open(fig_data_path, "wb") as file:
     pickle.dump(results, file)
 
 plot_mean_rate_vs_snr(snr_db_list, results, save_path=fig_path)

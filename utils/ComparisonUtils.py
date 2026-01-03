@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from utils.CentralizedUtils import evaluate_centralized_adam, compute_strongest_bottleneck_rate, compute_equal_power_bound
+from utils.CentralizedUtils import evaluate_centralized_adam, compute_strongest_bottleneck_rate, compute_equal_power_bound, compute_greedy_maxlink_rate
 from utils.PathUtils import find_all_paths, paths_to_tensor
 from utils.MetricUtils import calc_sum_rate
 from utils.DataUtils import mean_var_over_dataset
@@ -25,7 +25,7 @@ def evaluate_across_snr(
     Args:
         dataset: iterable of graph data objects.
         model:   trained GNN model.
-        B:       number of bands.
+        B: number of bands.
         snr_db_list: list of SNR values in dB.
         problem: "single", "multicast", or "multi".
         multi_mode: for problem=="multi" in strongest-bottleneck:
@@ -34,10 +34,11 @@ def evaluate_across_snr(
 
     Returns:
         dict: {
-            "gnn":                {snr_db: mean_rate},
-            "centralized":        {snr_db: mean_rate},
+            "gnn": {snr_db: mean_rate},
+            "centralized": {snr_db: mean_rate},
             "strongest bottleneck": {snr_db: mean_rate},
-            "equal power":        {snr_db: mean_rate},
+            "equal power": {snr_db: mean_rate},
+            "greedy maxlink": {snr_db: mean_rate}
         }
     """
     device = next(model.parameters()).device
@@ -46,6 +47,7 @@ def evaluate_across_snr(
         "centralized": {},
         "strongest bottleneck": {},
         "equal power": {},
+        "greedy maxlink": {}
     }
 
     # --- compute mean channel variance for noise scaling ---
@@ -100,7 +102,7 @@ def evaluate_across_snr(
                     subgraphs_per_band = [subgraphs for _ in range(B)]
 
                 elif problem == "multi":
-                    # multi-commodity: Tx→rx_k for each k
+                    # multicommodity: Tx→rx_k for each k
                     if isinstance(rx, (list, tuple)):
                         rx_list = list(rx)
                     else:
@@ -179,6 +181,16 @@ def evaluate_across_snr(
             problem=problem,
         )
         results["equal power"][snr_db] = float(np.mean(rates_equal_power))
+
+        # ==============================================
+        # 5) Greedy max-link benchmark
+        # ==============================================
+        rates_greedy, _ = compute_greedy_maxlink_rate(
+            dataset,
+            sigma_noise=sigma,
+            problem=problem,
+        )
+        results["greedy maxlink"][snr_db] = float(np.mean(rates_greedy))
 
     return results
 
