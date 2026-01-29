@@ -1,4 +1,3 @@
-import os
 import torch
 from configparser import ConfigParser
 from models.models import ChainedGNN
@@ -8,7 +7,6 @@ from utils.EstimationUtils import masked_band_variance_from_dataset, precompute_
 from utils.ConfigUtils import parse_args, load_ini_config
 from visualization.GraphingAux import plot_mean_rate_vs_snr
 import pickle
-from torch.utils.data import random_split
 
 # ====== config ======
 # args = parse_args()
@@ -16,7 +14,7 @@ from torch.utils.data import random_split
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\comp B_6 L_3 seed_5337_ K_2_multicommodity.ini"
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\comp_multicommodity.ini"
 parser = ConfigParser()
 parser.read_file(open(cfg_path))
 print(f"Loaded default config: {cfg_path}")
@@ -97,9 +95,9 @@ else:
     print("Using True CSI")
 
 # Choose K for the model:
-# - single:     K_model = 1
-# - multicast:  K_model = K_cfg (to enable per-receiver role channels; still one shared message)
-# - multi:      K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
+# - single: K_model = 1
+# - multicast: K_model = K_cfg (to enable per-receiver role channels; still one shared message)
+# - multi: K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
 if MODE == "single":
     K_model = 1
 elif MODE == "multicast":

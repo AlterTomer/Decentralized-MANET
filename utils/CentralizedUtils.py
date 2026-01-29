@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import random
 from utils.PathUtils import find_all_paths, paths_to_tensor
 from utils.TensorUtils import normalize_power, create_normalized_tensor, init_equal_power
 from utils.MetricUtils import calc_sum_rate, objective_single_wrapper
@@ -850,87 +851,33 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
     return np.array(rate_bounds), p_store
 
 
-def _greedy_maxlink_P_single_or_multicast(h, adj):
+def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
     """
-    Build greedy P for SINGLE/MULTICAST problems.
+    Greedy-power benchmark:
 
-    h:   [B, n, n] complex (or complex-like) tensor
-    adj: [n, n] adjacency (0/1)
+    SINGLE:
+      - Use find_all_paths to get all Tx->Rx paths.
+      - Take the path with the fewest hops (if multiple, choose randomly).
+      - For each hop (u->v) on that path and each band b, set P[b,u,v] = 1/sqrt(B).
+      - Feed P into calc_sum_rate (after normalize_power).
+
+    MULTICAST:
+      - Use find_multicast_subgraphs to get candidate subgraphs.
+      - Pick the subgraph with the fewest links (if ties, pick randomly).
+      - Use that single subgraph in objective_multicast.
+      - Allocate P[b,u,v] = 1/sqrt(B) for edges (u->v) in this subgraph.
+      - Feed P and subgraphs_per_band into objective_multicast (after normalize_power).
+
+    MULTI (multicommodity):
+      - For each receiver rx_k:
+          - Use find_all_paths to get Tx->rx_k paths.
+          - Pick a shortest path (ties broken randomly).
+          - Allocate P[b,k,u,v] = 1/sqrt(B) on each hop of that path.
+      - Pass P (and routing Z from adjacency) into objective_multicommodity (after normalize_power).
+
     Returns:
-      P: [B, n, n] float tensor where for each transmitter i:
-           choose (b*, j*) = argmax |h[b,i,j]|^2 over feasible neighbors j!=i,
-           set P[b*, i, j*] = 1, else 0.
-    """
-    device = h.device
-    B, n, _ = h.shape
-
-    # |h|^2
-    if torch.is_complex(h):
-        hpow = h.abs().pow(2)
-    else:
-        # If you store real/imag separately, adapt this.
-        raise TypeError("links_matrix must be complex dtype for this benchmark (or adapt |h|^2 computation).")
-
-    # Feasible mask: adjacency and no self-loops
-    mask = (adj > 0).to(device)
-    mask.fill_diagonal_(False)  # no self loops
-
-    # Expand to [B,n,n]
-    mask_B = mask.unsqueeze(0).expand(B, -1, -1)
-
-    # Infeasible -> -inf for argmax
-    scores = hpow.masked_fill(~mask_B, float("-inf"))
-
-    P = torch.zeros((B, n, n), device=device)
-
-    for i in range(n):
-        flat = scores[:, i, :].reshape(-1)  # [B*n]
-        if torch.isneginf(flat).all():
-            # isolated node (no outgoing links): leave zeros
-            continue
-        k = torch.argmax(flat).item()
-        b_star = k // n
-        j_star = k % n
-        P[b_star, i, j_star] = 1.0
-
-    return P
-
-
-def _greedy_maxlink_P_multi(h, adj, K):
-    """
-    Build greedy P for MULTI-COMMODITY problem.
-
-    Your multicommodity objective expects P shape [B, K, n, n].
-
-    Interpretation choice (reasonable default):
-    - Each commodity k gets its own greedy allocation (same rule), i.e.,
-      for each k and each node i pick the strongest (b,j) and set P[b,k,i,j]=1.
-
-    Then we pass through normalize_power(P, adj) to enforce the project’s power constraints.
-    """
-    device = h.device
-    B, n, _ = h.shape
-
-    # Build per-commodity greedy allocations
-    P = torch.zeros((B, K, n, n), device=device)
-    for k in range(K):
-        P[:, k] = _greedy_maxlink_P_single_or_multicast(h, adj)
-
-    return P
-
-
-def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
-    """
-    Greedy max-link baseline:
-
-    For each node i, among all feasible outgoing links across all B bands and neighbors,
-    pick the single link with maximal |h|^2 and allocate all power (1) to it.
-
-    - SINGLE:    P is [B,n,n], rate=calc_sum_rate
-    - MULTICAST: P is [B,n,n], rate=objective_multicast
-    - MULTI:     P is [B,K,n,n], rate=objective_multicommodity
-
-    Use normalize_power(P, adj) for consistency with your other baselines.
+      rate_bounds: np.ndarray of shape [len(dataset)]
+      p_store:     list of P (and Z for multi) tensors for debugging/inspection.
     """
     rate_bounds = []
     p_store = []
@@ -950,24 +897,30 @@ def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
         # SINGLE
         # --------------------------
         if problem == "single":
-            paths = find_all_paths(adj.cpu(), data.tx, data.rx)
-            if not paths:
+            all_paths = find_all_paths(adj.cpu(), data.tx, data.rx)
+            if not all_paths:
                 rate_bounds.append(0.0)
                 continue
-            paths = paths_to_tensor(paths, device)
 
-            P = _greedy_maxlink_P_single_or_multicast(h, adj)     # [B,n,n]
+            # shortest by number of edges
+            lengths = [len(p) - 1 for p in all_paths]
+            min_len = min(lengths)
+            shortest_paths = [p for p, L in zip(all_paths, lengths) if L == min_len]
+            chosen_path = random.choice(shortest_paths)
+
+            P = _build_P_from_path_single(h, adj, chosen_path)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
 
+            paths_tensor = paths_to_tensor(all_paths, device)    # objective still uses all paths
             rate = calc_sum_rate(
                 h_arr=h,
                 p_arr=P,
                 sigma=torch.tensor(sigma, device=device),
-                paths_tensor=paths,
+                paths_tensor=paths_tensor,
                 B=B,
                 tau=0.0,
                 eps=1e-12,
-                per_band=False
+                per_band=False,
             )
             rate_bounds.append(rate.item())
             p_store.append(P.detach())
@@ -986,9 +939,17 @@ def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
                 rate_bounds.append(0.0)
                 continue
 
-            subgraphs_per_band = [subgraphs for _ in range(B)]
+            # Choose the subgraph with the smallest number of links
+            best_sg = _select_shortest_subgraph(subgraphs)
+            if best_sg is None:
+                rate_bounds.append(0.0)
+                continue
 
-            P = _greedy_maxlink_P_single_or_multicast(h, adj)     # [B,n,n]
+            # Use ONLY this subgraph in all bands
+            subgraphs_per_band = [[best_sg] for _ in range(B)]
+
+            # Build P based on that subgraph
+            P = _build_P_from_multicast_subgraph(h, adj, best_sg)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
 
             rate = objective_multicast(
@@ -1015,11 +976,12 @@ def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
                 rx_list = rx_list[0]
             K = len(rx_list)
 
-            paths_k = []
+            # Collect all paths for each commodity (same as in equal-power)
+            paths_k_lists = []
             has_path = False
             for rx_k in rx_list:
                 pk = find_all_paths(adj.cpu(), data.tx, rx_k)
-                paths_k.append(paths_to_tensor(pk, device) if pk else torch.empty((0,0), device=device, dtype=torch.long))
+                paths_k_lists.append(pk if pk else [])
                 if pk:
                     has_path = True
 
@@ -1027,9 +989,17 @@ def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
                 rate_bounds.append(0.0)
                 continue
 
-            P = _greedy_maxlink_P_multi(h, adj, K)  # [B,K,n,n]
+            # Build P from shortest paths per commodity
+            P = _build_P_from_paths_multi(h, adj, paths_k_lists, K)  # [B,K,n,n]
             P = normalize_power(P, adj).to(device)
 
+            # paths_k in tensor form for the objective
+            paths_k_tensors = [
+                paths_to_tensor(pk, device) if pk else torch.empty((0, 0), device=device, dtype=torch.long)
+                for pk in paths_k_lists
+            ]
+
+            # routing matrix same as in equal-power baseline
             Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, K, n, n).to(device)
 
             rate = objective_multicommodity(
@@ -1038,7 +1008,7 @@ def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
                 z=Z,
                 sigma=torch.tensor(sigma, device=device),
                 adj=adj,
-                paths_k=paths_k,
+                paths_k=paths_k_tensors,
                 tau_min=0.0,
                 tau_max=0.0,
                 reduce="mean",
@@ -1052,6 +1022,118 @@ def compute_greedy_maxlink_rate(dataset, sigma_noise=False, problem="single"):
         raise ValueError(f"Unknown problem='{problem}'")
 
     return np.array(rate_bounds), p_store
+
+
+def _build_P_from_path_single(h, adj, path_nodes):
+    """
+    For SINGLE / MULTICAST (per-path) case:
+    Given a node-sequence path [v0, v1, ..., vL], construct P of shape [B,n,n] such that:
+        - For each hop (u -> v) along the path and for each band b, P[b,u,v] = 1/sqrt(B)
+        - All other entries are 0.
+    """
+    device = h.device
+    B, n, _ = h.shape
+
+    P = torch.zeros((B, n, n), device=device)
+    amp = 1.0 / (B ** 0.5)
+
+    # path_nodes is a list like [tx, ..., rx]
+    for u, v in zip(path_nodes[:-1], path_nodes[1:]):
+        P[:, u, v] = amp
+
+    return P
+
+
+def _build_P_from_paths_multi(h, adj, paths_k, K):
+    """
+    MULTI-COMMODITY case:
+    paths_k is a list length K, each element either:
+      - list of node-sequence paths [v0,...,vL] (from find_all_paths)
+      - or empty list / None if no path.
+
+    For each commodity k with at least one path:
+      - select a shortest path
+      - allocate 1/sqrt(B) on each hop of that path for all bands
+      - P has shape [B,K,n,n]
+    """
+    device = h.device
+    B, n, _ = h.shape
+    P = torch.zeros((B, K, n, n), device=device)
+    amp = 1.0 / (B ** 0.5)
+
+    for k, pk_raw in enumerate(paths_k):
+        # pk_raw was created earlier via find_all_paths; here we re-use those lists.
+        if pk_raw is None or len(pk_raw) == 0:
+            continue
+
+        # pk_raw is a list of node lists, e.g., [[tx,...,rx], ...]
+        path_lengths = [len(p) - 1 for p in pk_raw]  # number of edges
+        min_len = min(path_lengths)
+        candidates = [p for p, L in zip(pk_raw, path_lengths) if L == min_len]
+
+        chosen_path = random.choice(candidates)
+
+        # Set P[:,k,u,v] = 1/sqrt(B) for each hop
+        for u, v in zip(chosen_path[:-1], chosen_path[1:]):
+            P[:, k, u, v] = amp
+
+    return P
+
+
+def _select_shortest_subgraph(subgraphs):
+    """
+    Choose the subgraph with the smallest number of links.
+
+    You MUST adapt this depending on how a 'subgraph' is represented
+    in your code. The simplest case is that each subgraph is a dict
+    with an 'edges' field listing (u,v) pairs.
+    """
+    if not subgraphs:
+        return None
+
+    # Example assumption: each subgraph is dict-like: {'edges': [(u,v), ...], ...}
+    def num_edges(sg):
+        if isinstance(sg, dict) and "edges" in sg:
+            return len(sg["edges"])
+        # Fallback: if sg itself is a list of edges
+        if isinstance(sg, (list, tuple)) and sg and isinstance(sg[0], (list, tuple)):
+            return len(sg)
+        # Otherwise, treat as 0 (you should refine this to match your real structure)
+        return 0
+
+    edge_counts = [num_edges(sg) for sg in subgraphs]
+    min_edges = min(edge_counts)
+    candidates = [sg for sg, c in zip(subgraphs, edge_counts) if c == min_edges]
+
+    return random.choice(candidates)
+
+
+def _build_P_from_multicast_subgraph(h, adj, subgraph):
+    """
+    Build P for multicast from a chosen subgraph.
+
+    Assumes 'subgraph' exposes its edges as either:
+      - subgraph['edges'] = list of (u,v) pairs, or
+      - subgraph is itself a list of (u,v) pairs.
+
+    For each edge (u->v) in the chosen subgraph and each band b,
+    P[b,u,v] = 1/sqrt(B). Others are 0.
+    """
+    device = h.device
+    B, n, _ = h.shape
+    P = torch.zeros((B, n, n), device=device)
+    amp = 1.0 / (B ** 0.5)
+
+    # Extract edges list from subgraph
+    edges = [tuple(i.tolist()) for i in torch.nonzero(subgraph)]
+
+
+    for (u, v) in edges:
+        P[:, u, v] = amp
+
+    return P
+
+
 
 
 

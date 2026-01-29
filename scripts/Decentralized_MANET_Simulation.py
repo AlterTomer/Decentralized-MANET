@@ -36,7 +36,7 @@ from time import time
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\ChainedGNN B_6 L_3 seed_1337_n_6_multicommodity.ini"
+cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\ChainedGNN_multicommodity.ini"
 parser = ConfigParser()
 parser.read_file(open(cfg_path))
 print(f"Loaded default config: {cfg_path}")
@@ -52,7 +52,7 @@ L = int(train_params["L"])
 n = int(train_params["n"])
 tx = int(train_params["tx"])
 
-# rx can be int OR a list in the ini; handle both
+# rx can be an int OR a list in the ini; handle both
 _raw_rx = train_params["rx"].strip()
 if _raw_rx.startswith("[") and _raw_rx.endswith("]"):
     rx = [int(x) for x in _raw_rx[1:-1].replace(" ", "").split(",") if x]
@@ -60,6 +60,15 @@ elif "," in _raw_rx:
     rx = [int(x) for x in _raw_rx.replace(" ", "").split(",") if x]
 else:
     rx = int(_raw_rx)
+
+# SNR can be an int OR a list in the ini; handle both
+_raw_snr = train_params["SNR"].strip()
+if _raw_snr.startswith("[") and _raw_snr.endswith("]"):
+    SNR = [int(x) for x in _raw_snr[1:-1].replace(" ", "").split(",") if x]
+elif "," in _raw_snr:
+    SNR = [int(x) for x in _raw_snr.replace(" ", "").split(",") if x]
+else:
+    SNR = int(_raw_snr)
 
 sigma = float(train_params["sigma"])
 DROPOUT = float(train_params["dropout"])
@@ -105,7 +114,16 @@ else:
     rx_list = [rx] * num_samples
     K_cfg = 1
 
-sigma_list = [sigma] * num_samples
+sigma_vals = np.array([10 ** (-s / 10) for s in SNR])
+base = num_samples // len(sigma_vals)
+remainder = num_samples % len(sigma_vals)
+sigma_list = np.repeat(sigma_vals, base)
+if remainder > 0:
+    extra_indices = np.random.choice(len(sigma_vals), size=remainder, replace=True)
+    extra_values = sigma_vals[extra_indices]
+    sigma_list = np.concatenate([sigma_list, extra_values])
+np.random.shuffle(sigma_list)
+sigma_list.tolist()
 
 dataset = generate_graph_data(
     n_list=n_list,
@@ -153,9 +171,9 @@ else:
 
 # ====== model / optim / amp ======
 # Choose K for the model:
-# - single:     K_model = 1
-# - multicast:  K_model = K_cfg (to enable per-receiver role channels; still one shared message)
-# - multi:      K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
+# - single: K_model = 1
+# - multicast: K_model = K_cfg (to enable per-receiver role channels; still one shared message)
+# - multi: K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
 if MODE == "single":
     K_model = 1
 elif MODE == "multicast":
@@ -268,7 +286,7 @@ for epoch in range(MAX_EPOCHS):
             epoch=epoch,
             best_val=best_val,
             cfg_path=cfg_path,
-            ckpt_dir=CKPT_DIR,      # FIX: was CKKT_DIR
+            ckpt_dir=CKPT_DIR,
             prefix=ckpt_prefix,
             include_training_state=include_training_state,
             optimizer=optimizer,

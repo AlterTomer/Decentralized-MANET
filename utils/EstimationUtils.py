@@ -12,7 +12,7 @@ def lmmse_estimate_masked(
     pilot_power: float = 1.0,        # power per pilot symbol
 ) -> torch.Tensor:
     """
-    Mask-aware LMMSE: \hat{h} = alpha * Y with alpha = S_h / (S_h + S_w / (M*P_pilot))
+    Mask-aware LMMSE: h_hat = alpha * Y with alpha = S_h / (S_h + S_w / (M*P_pilot))
     Off-mask entries are returned as exactly zero.
 
     Y, prior_var, noise_var can be on CPU or CUDA. Complex dtype supported.
@@ -125,10 +125,10 @@ def precompute_csi_estimates(
 
     Inputs:
       - dataset: your base dataset whose items provide:
-          .links_matrix  (H_true)   [B, n, n] complex or real 2x-channel
-          .adj_matrix    (n, n)     boolean/0-1
-          .sigma         scalar noise std (if est_noise_std is None)
-      - pilots_M, pilot_power, prior_var: LMMSE hyper-parameters
+          .links_matrix (H_true) [B, n, n] complex or real 2x-channel
+          .adj_matrix (n, n) boolean/0-1
+          .sigma scalar noise std (if est_noise_std is None)
+      - pilots_M, pilot_power, prior_var: LMMSE hyperparameters
       - est_noise_std: overrides per-sample data.sigma if provided
       - seed: deterministic per-sample RNG base
 

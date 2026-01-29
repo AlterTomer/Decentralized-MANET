@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from utils.CentralizedUtils import evaluate_centralized_adam, compute_strongest_bottleneck_rate, compute_equal_power_bound, compute_greedy_maxlink_rate
+from utils.CentralizedUtils import evaluate_centralized_adam, compute_strongest_bottleneck_rate, compute_equal_power_bound, compute_greedy_power_rate
 from utils.PathUtils import find_all_paths, paths_to_tensor
 from utils.MetricUtils import calc_sum_rate
 from utils.DataUtils import mean_var_over_dataset
@@ -185,7 +185,7 @@ def evaluate_across_snr(
         # ==============================================
         # 5) Greedy max-link benchmark
         # ==============================================
-        rates_greedy, _ = compute_greedy_maxlink_rate(
+        rates_greedy, _ = compute_greedy_power_rate(
             dataset,
             sigma_noise=sigma,
             problem=problem,

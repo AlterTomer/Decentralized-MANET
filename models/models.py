@@ -67,9 +67,9 @@ class GatedGCNLayer(MessagePassing):
     def forward(self, x, edge_index, edge_attr):
         """
         Args:
-            x (Tensor):             [n, D_n_in] node features.
+            x (Tensor): [n, D_n_in] node features.
             edge_index (LongTensor):[2, E] (src=j, dst=i).
-            edge_attr (Tensor):     [E, D_e_in] edge features.
+            edge_attr (Tensor): [E, D_e_in] edge features.
 
         Returns:
             (x_out, e_out): ([n, D_n_out], [E, D_e_out])
@@ -128,8 +128,8 @@ class ChainedGNN(nn.Module):
 
     Overview per sample (variable n, fixed B):
       1) Build node features from P0 ∈ ℝ^{B×n×n}:
-           x_out[i] = Σ_j P0[:, i, j] ∈ ℝ^B   (bandwise outgoing power)
-           x_in[i]  = Σ_j P0[:, j, i] ∈ ℝ^B   (bandwise incoming power)
+           x_out[i] = Σ_j P0[:, i, j] ∈ ℝ^B   (band-wise outgoing power)
+           x_in[i]  = Σ_j P0[:, j, i] ∈ ℝ^B   (band-wise incoming power)
            role[i]  ∈ {Tx, Rx, Relay} one-hot (size 3)
            x_node[i] = concat[x_out[i], x_in[i], role[i]] ∈ ℝ^{2B+3}
       2) Run L FiLM/Gated message-passing layers (each does PreNorm + residuals).
@@ -137,12 +137,12 @@ class ChainedGNN(nn.Module):
            - "max": elementwise max over {x^(0), …, x^(ℓ)} → fixed dim = node_hidden
            - "concat": concat[x^(0)||…||x^(ℓ)] then a small Linear projects to node_hidden.
       4) Shared per-edge decoder:
-           dec_in = [ e^(ℓ)_{i→j},  x_i^{JK(ℓ)},  x_j^{JK(ℓ)} ]  → LayerNorm → MLP → Softplus.
+           dec_in = [ e^(ℓ)_{i→j}, x_i^{JK(ℓ)}, x_j^{JK(ℓ)} ] → LayerNorm → MLP → Softplus.
 
     Modes:
-      - problem="single":    one Tx→Rx, outputs per layer: [B, n, n]
+      - problem="single": one Tx→Rx, outputs per layer: [B, n, n]
       - problem="multicast": shared message to K receivers, outputs per layer: [B, n, n]
-      - problem="multi":     K distinct messages (commodities), outputs per layer: (P[ B,K,n,n ], Z[ B,K,n,n ])
+      - problem="multi": K distinct messages (commodities), outputs per layer: (P[ B,K,n,n ], Z[ B,K,n,n ])
     """
 
     def __init__(self,
@@ -199,7 +199,7 @@ class ChainedGNN(nn.Module):
 
         # p_head size depends on PROBLEM (not just K):
         # - single/multicast → B
-        # - multi            → B*K
+        # - multi → B*K
         if self.problem == "multi":
             p_out = B * K
         else:
@@ -369,3 +369,5 @@ class ChainedGNN(nn.Module):
                 outputs.append((p_full, z_full))
 
         return outputs
+
+

@@ -9,7 +9,7 @@ from utils.MetricUtils import link_rate
 
 def plot_train_valid_loss(train_loss, valid_rate, filename=False):
     """
-    Plot a loss curve vs epochs
+    Plot a loss curve vs. epochs
     Args:
         train_loss: Training loss array
         valid_rate: Validation rate array
@@ -43,7 +43,7 @@ def plot_train_valid_loss(train_loss, valid_rate, filename=False):
 
 def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
     """
-    Benchmark plots of rate vs snr (centralized optimization, decentralized optimization, brute search, equal power)
+    Benchmark plots of rate vs. snr (centralized optimization, decentralized optimization, brute search, equal power)
 
     Args:
         snr_db: List of SNR values in dB.
@@ -62,7 +62,7 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
     plt.plot(snr_db, gnn,  marker="s", label="MANET-GNN", linestyle="dashed", markersize=12)
     plt.plot(snr_db, sbn,   marker="^", label="Best Single Channel", linestyle="dotted", markersize=12)
     plt.plot(snr_db, ep, marker="+", label="Equal-Split", linestyle="dashdot", markersize=12)
-    plt.plot(snr_db, gp, marker="*", label="Greedy-Split", linestyle='densely dashed', markersize=12)
+    plt.plot(snr_db, gp, marker="*", label="Greedy-Split", linestyle='-', markersize=12)
 
 
     plt.yscale("log")
@@ -84,7 +84,7 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
 
 def time_varying_model_compare_plot(snr_db, results, n_big, n_small, save_path=None):
     """
-    Time varying topologies comparison plots of rate vs snr (models were trained on different topologies, the data is based on one of the topologies)
+    Time varying topologies comparison plots of rate vs. snr (models were trained on different topologies, the data is based on one of the topologies)
 
     Args:
         snr_db: List of SNR values in dB.
@@ -120,7 +120,7 @@ def time_varying_model_compare_plot(snr_db, results, n_big, n_small, save_path=N
 
 def est_true_model_compare_plot(snr_db, results, save_path=None):
     """
-    True CSI model compared with estimated CSI model plots of rate vs snr (models were trained on different topologies, the data is based on one of the topologies)
+    True CSI model compared with estimated CSI model plots of rate vs. snr (models were trained on different topologies, the data is based on one of the topologies)
 
     Args:
         snr_db: List of SNR values in dB.
@@ -192,7 +192,7 @@ def visualize_best_paths(adj_matrix, best_paths, links_mat, p_arr, sigma, title=
     # Legend entries
     legend_patches = []
 
-    # Draw best paths in different colors
+    # Draw the best paths in different colors
     for b, path in best_paths.items():
         if path is None:
             continue  # Skip if no valid path
