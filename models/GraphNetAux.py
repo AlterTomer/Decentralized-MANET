@@ -31,9 +31,9 @@ def _compute_rates_per_layer(
     Forward pass -> per-layer power normalization -> objective value per layer.
 
     Args:
-        model:  GNN model; model.B is number of bands; model.K may be >1 for multi-commodity.
-        data:   batch with at least: adj_matrix [n,n], links_matrix [B,n,n] (complex), sigma (float or [B]).
-        paths:  (single) LongTensor [num_paths, max_len] (−1 padded).
+        model: GNN model; model.B is the number of bands; model.K may be >1 for multicommodity.
+        data:   batch with at least: adj_matrix [n,n], links_matrix [B, n,n] (complex), sigma (float or [B]).
+        paths: (single) LongTensor [num_paths, max_len] (−1 padded).
         subgraphs_per_band: (multicast) list length B; each element is a list of subgraphs (edge lists or masks).
         paths_k: (multi) list length K; each item is LongTensor [num_paths_k, max_len] (−1 padded).
         problem: "single" | "multicast" | "multi".
@@ -42,8 +42,8 @@ def _compute_rates_per_layer(
 
     Returns:
         rates_per_layer: list[Tensor], scalars.
-        p_list:          list[Tensor], each [B,n,n] (single/multicast) or [B,K,n,n] (multi) after normalization.
-        z_list:          list[Tensor|None], only for problem="multi" (each [B,K,n,n]); else [].
+        p_list:          list[Tensor], each [B, n,n] (single/multicast) or [B, K, n,n] (multi) after normalization.
+        z_list:          list[Tensor|None], only for problem="multi" (each [B, K, n,n]); else [].
     """
     if problem == "single":
         if paths is None:
@@ -65,9 +65,8 @@ def _compute_rates_per_layer(
     sig = data.sigma
 
     for out in outputs:
+        P_raw, Z = out
         if problem == "multi":
-            # out = (P, Z) where P,Z are [B,K,n,n]
-            P_raw, Z = out
             # normalize P per-commodity: for each k, normalize [B,n,n] with your existing routine
             P_norm = torch.empty_like(P_raw)
             for k in range(P_raw.shape[1]):
@@ -87,8 +86,6 @@ def _compute_rates_per_layer(
             p_list.append(P_norm)
             z_list.append(Z)
         else:
-            # out = P [B,n,n]
-            P_raw = out
             P_norm = normalize_power(P_raw, adj=adj.to(P_raw.device), eps=1e-12)
 
             if problem == "single":

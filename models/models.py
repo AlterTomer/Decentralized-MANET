@@ -349,7 +349,7 @@ class ChainedGNN(nn.Module):
                 p_edge = self.p_act(self.p_head(dec_in))       # [E, B]
                 p_full = (P0 if P0.dim()==3 else P0.sum(dim=1)).new_zeros((B, n, n))
                 p_full[:, src, dst] = p_edge.t()               # [B,E] → scatter
-                outputs.append(p_full)
+                z_full = torch.ones_like(p_full)
 
             else:
                 # ----- multi-commodity: output (P[ B,K,n,n ], Z[ B,K,n,n ]) -----
@@ -366,7 +366,7 @@ class ChainedGNN(nn.Module):
                 p_full[:, :, src, dst] = p_edge_bk.permute(1, 2, 0)             # [B,K,E] → scatter
                 z_full[:, :, src, dst] = z_edge_bk.permute(1, 2, 0)
 
-                outputs.append((p_full, z_full))
+            outputs.append((p_full, z_full))
 
         return outputs
 
