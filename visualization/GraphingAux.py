@@ -153,6 +153,48 @@ def est_true_model_compare_plot(snr_db, results, save_path=None):
     else:
         plt.show()
 
+
+def plot_models_mean_rate_vs_snr(snr_db, results, save_path=None):
+    """
+    Plot mean rate vs SNR for multiple trained models (one curve per model).
+
+    Args:
+        snr_db: list of SNR values in dB.
+        results: dict returned by evaluate_models_across_snr:
+                 {"models": {name: {snr_db: mean_rate}}}
+        save_path: if provided, save figure; else show.
+    """
+    model_dict = results.get("models", {})
+    if not model_dict:
+        raise ValueError("results['models'] is empty or missing.")
+
+    plt.figure(figsize=(16, 12))
+
+    # Keep a consistent x ordering
+    snr_db = list(snr_db)
+
+    # Plot each model as one curve
+    # (Markers cycle automatically; you can also hardcode if you want reproducibility)
+    for name, snr_to_rate in model_dict.items():
+        y = [snr_to_rate[s] for s in snr_db]
+        plt.plot(snr_db, y, marker="o", label=str(name), markersize=12)
+
+    plt.yscale("log")
+    plt.xlabel("SNR (dB)", fontsize=30)
+    plt.ylabel("Mean Rate", fontsize=30)
+    plt.grid(True, which="both")
+    plt.legend(fontsize=24)
+    plt.xticks(fontsize=25)
+    plt.yticks(fontsize=25)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=450)
+        plt.close()
+    else:
+        plt.show()
+
 def visualize_best_paths(adj_matrix, best_paths, links_mat, p_arr, sigma, title="Best Paths in MANET"):
     """
     Visualizes the MANET graph and highlights the best paths per frequency band with a legend.

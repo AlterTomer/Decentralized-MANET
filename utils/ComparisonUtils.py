@@ -338,3 +338,145 @@ def est_true_model_compare(true_dataset, est_dataset, true_model, est_model, snr
         results["est"][snr_db] = float(np.mean(est_rates)) if est_rates else float("nan")
 
     return results
+
+def evaluate_models_across_snr(
+    dataset,
+    models,
+    B,
+    snr_db_list,
+    *,
+    problem: str = "single",      # "single" | "multicast" | "multi"
+    multi_mode: str = "global",   # kept for API symmetry (not used inside GNN eval)
+    take_best_layer: bool = True, # matches your current behavior
+):
+    """
+    Evaluate achieved mean rate vs SNR for multiple trained GNN models (ablation study).
+
+    Args:
+        dataset: iterable of graph data objects.
+        models: list of tuples [(name, model), ...] OR dict {name: model}.
+                Each model must already be on the correct device.
+        B: number of bands.
+        snr_db_list: list of SNR values in dB.
+        problem: "single", "multicast", or "multi".
+        multi_mode: unused here; kept to match your existing signature style.
+        take_best_layer: if True, per sample take max over layer outputs (as in your code).
+                         if False, take last layer rate.
+
+    Returns:
+        dict: {
+            "models": {
+                model_name: {snr_db: mean_rate, ...},
+                ...
+            }
+        }
+    """
+    # Normalize models input
+    if isinstance(models, dict):
+        model_items = list(models.items())
+    else:
+        model_items = list(models)  # list of (name, model)
+
+    if len(model_items) == 0:
+        raise ValueError("models is empty.")
+
+    # Compute mean channel variance once (consistent noise scaling)
+    mean_channel_var = mean_var_over_dataset(dataset)
+
+    results = {"models": {name: {} for name, _ in model_items}}
+
+    for snr_db in snr_db_list:
+        snr = 10.0 ** (snr_db / 10.0)
+        sigma2 = mean_channel_var / snr
+        sigma = float(sigma2 ** 0.5)
+        print(f"SNR: {snr_db} dB")
+
+        for name, model in model_items:
+            device = next(model.parameters()).device
+            model.eval()
+
+            with torch.no_grad():
+                rates = []
+                for d in dataset:
+                    # Set noise (same behavior as your baseline function)
+                    d.sigma = torch.tensor(sigma, device=device)
+
+                    adj = d.adj_matrix
+                    tx = d.tx
+                    rx = d.rx
+
+                    paths = None
+                    subgraphs_per_band = None
+                    paths_k = None
+
+                    if problem == "single":
+                        raw_paths = find_all_paths(adj.cpu(), tx, rx)
+                        if not raw_paths:
+                            rates.append(0.0)
+                            continue
+                        paths = paths_to_tensor(raw_paths, device)
+
+                    elif problem == "multicast":
+                        # rx is list of receivers (kept for parity with your code)
+                        if isinstance(rx, (list, tuple)):
+                            rx_list = list(rx)
+                        else:
+                            rx_list = [rx]
+
+                        subgraphs = find_multicast_subgraphs(d.adj_matrix, d.tx, d.rx)
+                        if (subgraphs is None) or (len(subgraphs) == 0):
+                            rates.append(0.0)
+                            continue
+                        subgraphs_per_band = [subgraphs for _ in range(B)]
+
+                    elif problem == "multi":
+                        if isinstance(rx, (list, tuple)):
+                            rx_list = list(rx)
+                        else:
+                            rx_list = [rx]
+                        K = len(rx_list)
+
+                        paths_k = []
+                        has_any_path = False
+                        for rx_k in rx_list:
+                            raw_paths_k = find_all_paths(adj.cpu(), tx, rx_k)
+                            if raw_paths_k:
+                                has_any_path = True
+                                paths_k.append(paths_to_tensor(raw_paths_k, device))
+                            else:
+                                paths_k.append(torch.empty((0, 0), dtype=torch.long, device=device))
+
+                        if not has_any_path:
+                            rates.append(0.0)
+                            continue
+
+                    else:
+                        raise ValueError(f"Unknown problem type: {problem}")
+
+                    setattr(d, "problem", problem)
+                    d = d.to(device)
+
+                    rates_per_layer, _, _ = _compute_rates_per_layer(
+                        model,
+                        d,
+                        paths=paths,
+                        subgraphs_per_band=subgraphs_per_band,
+                        paths_k=paths_k,
+                        problem=problem,
+                        tau_min=0.0,
+                        tau_max=0.0,
+                    )
+
+                    layer_rates = torch.stack(rates_per_layer)  # [L]
+                    if take_best_layer:
+                        rate = layer_rates.max().item()
+                    else:
+                        rate = layer_rates[-1].item()
+                    rates.append(rate)
+
+            results["models"][name][snr_db] = float(np.mean(rates))
+
+    return results
+
+
+
