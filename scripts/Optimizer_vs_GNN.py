@@ -138,4 +138,5 @@ with open(fig_data_path, "wb") as file:
     pickle.dump(results, file)
 
 plot_mean_rate_vs_snr(snr_db_list, results, save_path=fig_path)
+print(f'Fig saved at: {fig_path}')
 
