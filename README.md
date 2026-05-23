@@ -372,7 +372,7 @@ If you use this repository in your research, please cite:
   author={Alter, Tomer and Shlezinger, Nir and Segal, Michael},
   journal={IEEE Transactions on Communications},
   year={2026}
-  note={Under review}C
+  note={Under review}
 }
 ```
 
