@@ -358,7 +358,7 @@ Representative results are shown in Section IV of the paper.
 
 The current preprint is available here:
 
-[MANET-GNN TCOM Preprint](./paper/MANET-GNN Learned Decentralized Optimization of Power Allocation in Multi-Channel MANETs.pdf)
+[MANET-GNN TCOM Preprint](./paper/MANET-GNN%20Learned%20Decentralized%20Optimization%20of%20Power%20Allocation%20in%20Multi-Channel%20MANETs.pdf)
 
 > Under review in IEEE Transactions on Communications.
 
