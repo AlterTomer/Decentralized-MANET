@@ -350,7 +350,7 @@ under:
 
 MANET-GNN consistently approaches centralized optimization performance while preserving decentralized operation.
 
-Representative results are shown in Section IV of the paper. fileciteturn0file0L705-L739
+Representative results are shown in Section IV of the paper.
 
 ---
 
@@ -358,7 +358,7 @@ Representative results are shown in Section IV of the paper. fileciteturn0
 
 The current preprint is available here:
 
-[MANET-GNN TCOM Preprint](paper/MANET-GNN Learned Decentralized Optimization of Power Allocation in Multi-Channel MANETs.pdf)
+[MANET-GNN TCOM Preprint](./paper/MANET-GNN Learned Decentralized Optimization of Power Allocation in Multi-Channel MANETs.pdf)
 
 > Under review in IEEE Transactions on Communications.
 
