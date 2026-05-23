@@ -5,7 +5,7 @@
 This repository accompanies the paper:
 
 **Tomer Alter, Nir Shlezinger, and Michael Segal**
-*MANET-GNN: Learned Decentralized Optimization of Power Allocation in Multi-Channel MANETs* fileciteturn0file0L1-L17
+*MANET-GNN: Learned Decentralized Optimization of Power Allocation in Multi-Channel MANETs* - Extended journal version under review.
 
 ---
 
@@ -354,6 +354,14 @@ Representative results are shown in Section IV of the paper. fileciteturn0
 
 ---
 
+## Paper
+
+The current preprint is available here:
+
+[MANET-GNN TCOM Preprint](paper/MANET_GNN_TCOM_Preprint.pdf)
+
+> Under review in IEEE Transactions on Communications.
+
 ## Citation
 
 If you use this repository in your research, please cite:
@@ -364,6 +372,7 @@ If you use this repository in your research, please cite:
   author={Alter, Tomer and Shlezinger, Nir and Segal, Michael},
   journal={IEEE Transactions on Communications},
   year={2026}
+  note={Under review}C
 }
 ```
 
@@ -372,6 +381,7 @@ If you use this repository in your research, please cite:
 ## Related Publication
 
 ```text
+Extended journal version under review.
 T. Alter, N. Shlezinger, and M. Segal,
 "MANET-GNN: Learned Decentralized Optimization of Power Allocation in Multi-Channel MANETs,"
 IEEE Transactions on Communications, 2026.
