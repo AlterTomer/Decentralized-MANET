@@ -10,14 +10,197 @@ from Multicast.SubGraphs import find_multicast_subgraphs
 # -------------------------------
 # Helpers
 # -------------------------------
+# def evaluate_across_snr(
+#     dataset,
+#     model,
+#     B,
+#     snr_db_list,
+#     *,
+#     problem: str = "single",      # "single" | "multicast" | "multi"
+#     multi_mode: str = "global",   # only used for problem=="multi" in bottleneck
+# ):
+#     """
+#     Sequential evaluation across a list of SNR values.
+#
+#     Args:
+#         dataset: iterable of graph data objects.
+#         model:   trained GNN model.
+#         B: number of bands.
+#         snr_db_list: list of SNR values in dB.
+#         problem: "single", "multicast", or "multi".
+#         multi_mode: for problem=="multi" in strongest-bottleneck:
+#             - "global": single best (b,k) over all commodities.
+#             - "per_commodity": unique band per commodity (if you use that mode).
+#
+#     Returns:
+#         dict: {
+#             "gnn": {snr_db: mean_rate},
+#             "centralized": {snr_db: mean_rate},
+#             "strongest bottleneck": {snr_db: mean_rate},
+#             "equal power": {snr_db: mean_rate},
+#             "greedy maxlink": {snr_db: mean_rate}
+#         }
+#     """
+#     device = next(model.parameters()).device
+#     results = {
+#         "gnn": {},
+#         "centralized": {},
+#         "strongest bottleneck": {},
+#         "equal power": {},
+#         "greedy maxlink": {}
+#     }
+#
+#     # --- compute mean channel variance for noise scaling ---
+#     mean_channel_var = mean_var_over_dataset(dataset)
+#
+#     for snr_db in snr_db_list:
+#         snr = 10.0 ** (snr_db / 10.0)
+#         sigma2 = mean_channel_var / snr
+#         sigma = sigma2 ** 0.5
+#         print(f"SNR: {snr_db} dB")
+#
+#         # =================================================
+#         # 1) GNN mean rate
+#         # =================================================
+#         model.eval()
+#         with torch.no_grad():
+#             rates = []
+#             for d in dataset:
+#                 # Set noise
+#                 d.sigma = torch.tensor(sigma, device=device)
+#
+#                 adj = d.adj_matrix
+#                 tx = d.tx
+#                 rx = d.rx
+#
+#                 # Problem-specific structures for _compute_rates_per_layer
+#                 paths = None
+#                 subgraphs_per_band = None
+#                 paths_k = None
+#
+#                 if problem == "single":
+#                     # Tx → Rx paths
+#                     raw_paths = find_all_paths(adj.cpu(), tx, rx)
+#                     if not raw_paths:
+#                         # no connectivity → rate 0 for this sample
+#                         rates.append(0.0)
+#                         continue
+#                     paths = paths_to_tensor(raw_paths, device)
+#
+#                 elif problem == "multicast":
+#                     # rx is list of receivers
+#                     if isinstance(rx, (list, tuple)):
+#                         rx_list = list(rx)
+#                     else:
+#                         rx_list = [rx]
+#
+#                     # One multicast subgraph set, replicated across bands
+#                     subgraphs = find_multicast_subgraphs(d.adj_matrix, d.tx, d.rx)
+#                     if (subgraphs is None) or (len(subgraphs) == 0):
+#                         rates.append(0.0)
+#                         continue
+#                     subgraphs_per_band = [subgraphs for _ in range(B)]
+#
+#                 elif problem == "multi":
+#                     # multicommodity: Tx→rx_k for each k
+#                     if isinstance(rx, (list, tuple)):
+#                         rx_list = list(rx)
+#                     else:
+#                         rx_list = [rx]
+#                     K = len(rx_list)
+#
+#                     paths_k = []
+#                     has_any_path = False
+#                     for rx_k in rx_list:
+#                         raw_paths_k = find_all_paths(adj.cpu(), tx, rx_k)
+#                         if raw_paths_k:
+#                             has_any_path = True
+#                         paths_k.append(paths_to_tensor(raw_paths_k, device) if raw_paths_k else
+#                                        torch.empty((0, 0), dtype=torch.long, device=device))
+#                     if not has_any_path:
+#                         rates.append(0.0)
+#                         continue
+#
+#                 else:
+#                     raise ValueError(f"Unknown problem type: {problem}")
+#
+#                 # Tag problem (if model cares about it)
+#                 setattr(d, "problem", problem)
+#                 d = d.to(device)
+#
+#                 # Call the new helper
+#                 rates_per_layer, _, _ = _compute_rates_per_layer(
+#                     model,
+#                     d,
+#                     paths=paths,
+#                     subgraphs_per_band=subgraphs_per_band,
+#                     paths_k=paths_k,
+#                     problem=problem,
+#                     tau_min=0.0,
+#                     tau_max=0.0,
+#                 )
+#
+#                 # Take best layer (as before)
+#                 layer_rates = torch.stack(rates_per_layer)  # [L]
+#                 rate = layer_rates.max().item()
+#                 rates.append(rate)
+#
+#             results["gnn"][snr_db] = float(np.mean(rates))
+#
+#         # ==============================================
+#         # 2) Centralized ADAM benchmark (problem-aware)
+#         # ==============================================
+#         adam_rates, _ = evaluate_centralized_adam(
+#             dataset,
+#             B,
+#             noise_std=sigma,
+#             num_iterations=50,
+#             problem=problem,
+#         )
+#         results["centralized"][snr_db] = float(np.mean(adam_rates))
+#
+#         # ==============================================
+#         # 3) Strongest bottleneck lower bound
+#         # ==============================================
+#         bottleneck_rates, _ = compute_strongest_bottleneck_rate(
+#             dataset,
+#             problem=problem,
+#             sigma_noise=sigma,
+#             multi_mode=multi_mode if problem == "multi" else "global",
+#         )
+#         # For multi+per_commodity you may want a different aggregation;
+#         # here we assume scalar-per-graph (global) or we just mean over all entries.
+#         results["strongest bottleneck"][snr_db] = float(np.mean(bottleneck_rates))
+#
+#         # ==============================================
+#         # 4) Equal-power heuristic (make it problem-aware too)
+#         # ==============================================
+#         rates_equal_power, _ = compute_equal_power_bound(
+#             dataset,
+#             sigma_noise=sigma,
+#             problem=problem,
+#         )
+#         results["equal power"][snr_db] = float(np.mean(rates_equal_power))
+#
+#         # ==============================================
+#         # 5) Greedy max-link benchmark
+#         # ==============================================
+#         rates_greedy, _ = compute_greedy_power_rate(
+#             dataset,
+#             sigma_noise=sigma,
+#             problem=problem,
+#         )
+#         results["greedy maxlink"][snr_db] = float(np.mean(rates_greedy))
+#
+#     return results
 def evaluate_across_snr(
     dataset,
     model,
     B,
     snr_db_list,
     *,
-    problem: str = "single",      # "single" | "multicast" | "multi"
-    multi_mode: str = "global",   # only used for problem=="multi" in bottleneck
+    problem: str = "single",      # "single" | "multicast" | "multi" | "converge" | "multiunicast"
+    multi_mode: str = "global",   # used for multi-message problems in bottleneck
 ):
     """
     Sequential evaluation across a list of SNR values.
@@ -27,10 +210,15 @@ def evaluate_across_snr(
         model:   trained GNN model.
         B: number of bands.
         snr_db_list: list of SNR values in dB.
-        problem: "single", "multicast", or "multi".
-        multi_mode: for problem=="multi" in strongest-bottleneck:
+        problem: one of
+            - "single"
+            - "multicast"
+            - "multi"
+            - "converge"
+            - "multiunicast"
+        multi_mode: for multi-message problems in strongest-bottleneck:
             - "global": single best (b,k) over all commodities.
-            - "per_commodity": unique band per commodity (if you use that mode).
+            - "per_commodity": unique band per commodity (if supported).
 
     Returns:
         dict: {
@@ -73,50 +261,99 @@ def evaluate_across_snr(
                 tx = d.tx
                 rx = d.rx
 
+                # normalize tx/rx into python lists when needed
+                if isinstance(tx, torch.Tensor):
+                    tx = tx.view(-1).tolist() if tx.numel() > 1 else int(tx.item())
+                if isinstance(rx, torch.Tensor):
+                    rx = rx.view(-1).tolist() if rx.numel() > 1 else int(rx.item())
+
                 # Problem-specific structures for _compute_rates_per_layer
                 paths = None
                 subgraphs_per_band = None
                 paths_k = None
 
                 if problem == "single":
-                    # Tx → Rx paths
+                    # Tx -> Rx paths
                     raw_paths = find_all_paths(adj.cpu(), tx, rx)
                     if not raw_paths:
-                        # no connectivity → rate 0 for this sample
                         rates.append(0.0)
                         continue
                     paths = paths_to_tensor(raw_paths, device)
 
                 elif problem == "multicast":
-                    # rx is list of receivers
-                    if isinstance(rx, (list, tuple)):
-                        rx_list = list(rx)
-                    else:
-                        rx_list = [rx]
-
-                    # One multicast subgraph set, replicated across bands
-                    subgraphs = find_multicast_subgraphs(d.adj_matrix, d.tx, d.rx)
+                    # one Tx, multiple Rx, shared message
+                    subgraphs = find_multicast_subgraphs(adj, tx, rx)
                     if (subgraphs is None) or (len(subgraphs) == 0):
                         rates.append(0.0)
                         continue
                     subgraphs_per_band = [subgraphs for _ in range(B)]
 
                 elif problem == "multi":
-                    # multicommodity: Tx→rx_k for each k
-                    if isinstance(rx, (list, tuple)):
-                        rx_list = list(rx)
-                    else:
-                        rx_list = [rx]
-                    K = len(rx_list)
+                    # one Tx, multiple Rx, one path set per receiver/message
+                    rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
 
                     paths_k = []
                     has_any_path = False
                     for rx_k in rx_list:
-                        raw_paths_k = find_all_paths(adj.cpu(), tx, rx_k)
+                        raw_paths_k = find_all_paths(adj.cpu(), tx, int(rx_k))
                         if raw_paths_k:
                             has_any_path = True
-                        paths_k.append(paths_to_tensor(raw_paths_k, device) if raw_paths_k else
-                                       torch.empty((0, 0), dtype=torch.long, device=device))
+                        paths_k.append(
+                            paths_to_tensor(raw_paths_k, device)
+                            if raw_paths_k else
+                            torch.empty((0, 0), dtype=torch.long, device=device)
+                        )
+                    if not has_any_path:
+                        rates.append(0.0)
+                        continue
+
+                elif problem == "converge":
+                    # multiple Tx, one Rx, one path set per transmitter/message
+                    tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                    if isinstance(rx, (list, tuple)):
+                        if len(rx) != 1:
+                            raise ValueError("For problem='converge', rx must contain exactly one receiver.")
+                        rx_scalar = int(rx[0])
+                    else:
+                        rx_scalar = int(rx)
+
+                    paths_k = []
+                    has_any_path = False
+                    for tx_k in tx_list:
+                        raw_paths_k = find_all_paths(adj.cpu(), int(tx_k), rx_scalar)
+                        if raw_paths_k:
+                            has_any_path = True
+                        paths_k.append(
+                            paths_to_tensor(raw_paths_k, device)
+                            if raw_paths_k else
+                            torch.empty((0, 0), dtype=torch.long, device=device)
+                        )
+                    if not has_any_path:
+                        rates.append(0.0)
+                        continue
+
+                elif problem == "multiunicast":
+                    # multiple Tx-Rx pairs, one path set per pair/message
+                    tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                    rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+
+                    if len(tx_list) != len(rx_list):
+                        raise ValueError(
+                            f"For problem='multiunicast', len(tx) must equal len(rx), "
+                            f"got {len(tx_list)} and {len(rx_list)}."
+                        )
+
+                    paths_k = []
+                    has_any_path = False
+                    for tx_k, rx_k in zip(tx_list, rx_list):
+                        raw_paths_k = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
+                        if raw_paths_k:
+                            has_any_path = True
+                        paths_k.append(
+                            paths_to_tensor(raw_paths_k, device)
+                            if raw_paths_k else
+                            torch.empty((0, 0), dtype=torch.long, device=device)
+                        )
                     if not has_any_path:
                         rates.append(0.0)
                         continue
@@ -128,7 +365,7 @@ def evaluate_across_snr(
                 setattr(d, "problem", problem)
                 d = d.to(device)
 
-                # Call the new helper
+                # Call helper
                 rates_per_layer, _, _ = _compute_rates_per_layer(
                     model,
                     d,
@@ -140,7 +377,7 @@ def evaluate_across_snr(
                     tau_max=0.0,
                 )
 
-                # Take best layer (as before)
+                # Take best layer
                 layer_rates = torch.stack(rates_per_layer)  # [L]
                 rate = layer_rates.max().item()
                 rates.append(rate)
@@ -148,7 +385,7 @@ def evaluate_across_snr(
             results["gnn"][snr_db] = float(np.mean(rates))
 
         # ==============================================
-        # 2) Centralized ADAM benchmark (problem-aware)
+        # 2) Centralized ADAM benchmark
         # ==============================================
         adam_rates, _ = evaluate_centralized_adam(
             dataset,
@@ -166,14 +403,12 @@ def evaluate_across_snr(
             dataset,
             problem=problem,
             sigma_noise=sigma,
-            multi_mode=multi_mode if problem == "multi" else "global",
+            multi_mode=multi_mode if problem in {"multi", "converge", "multiunicast"} else "global",
         )
-        # For multi+per_commodity you may want a different aggregation;
-        # here we assume scalar-per-graph (global) or we just mean over all entries.
         results["strongest bottleneck"][snr_db] = float(np.mean(bottleneck_rates))
 
         # ==============================================
-        # 4) Equal-power heuristic (make it problem-aware too)
+        # 4) Equal-power heuristic
         # ==============================================
         rates_equal_power, _ = compute_equal_power_bound(
             dataset,

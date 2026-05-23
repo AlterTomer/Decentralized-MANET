@@ -19,16 +19,9 @@ from utils.EstimationUtils import (
     precompute_csi_estimates,
     build_estimate_lookup,
 )
+from utils.ParseUtils import parse_tx_rx_data
 from visualization.GraphingAux import plot_train_valid_loss
 from time import time
-
-# =========================
-# Problem mode:
-#   "single"    -> original single Tx→Rx (best-path)
-#   "multicast" -> shared message to K receivers (max–min over subgraphs)
-#   "multi"     -> K distinct messages (sum over commodities; each max–min path)
-# =========================
-
 
 # ====== config ======
 # args = parse_args()
@@ -36,7 +29,7 @@ from time import time
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-cfg_path = r"C:\Users\alter\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\ChainedGNN_multicommodity.ini"
+cfg_path = r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multiunicast\ChainedGNN_multiunicast.ini"
 parser = ConfigParser()
 parser.read_file(open(cfg_path))
 print(f"Loaded default config: {cfg_path}")
@@ -46,20 +39,10 @@ USE_AMP = torch.cuda.is_available()
 # ------- Training Parameters -------
 train_params = parser["Train Parameters"]
 SEED = int(train_params["seed"])
-MODE = train_params["mode"]  # "single" | "multicast" | "multi"
+MODE = train_params["mode"]  # "single" | "multicast" | "multi" | "converge" | "multiunicast"
 B = int(train_params["B"])
 L = int(train_params["L"])
 n = int(train_params["n"])
-tx = int(train_params["tx"])
-
-# rx can be an int OR a list in the ini; handle both
-_raw_rx = train_params["rx"].strip()
-if _raw_rx.startswith("[") and _raw_rx.endswith("]"):
-    rx = [int(x) for x in _raw_rx[1:-1].replace(" ", "").split(",") if x]
-elif "," in _raw_rx:
-    rx = [int(x) for x in _raw_rx.replace(" ", "").split(",") if x]
-else:
-    rx = int(_raw_rx)
 
 # SNR can be an int OR a list in the ini; handle both
 _raw_snr = train_params["SNR"].strip()
@@ -104,15 +87,26 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ====== dataset ======
 n_list = [n] * num_samples
-tx_list = [tx] * num_samples
 
-# replicate rx per sample (int or list)
-if isinstance(rx, list):
-    rx_list = [rx] * num_samples  # each sample may have a list of receivers
-    K_cfg = len(rx)
-else:
-    rx_list = [rx] * num_samples
+# tx, rx can be int OR a list in the ini; handle both
+raw_tx = train_params["tx"].strip()
+raw_rx = train_params["rx"].strip()
+tx, rx = parse_tx_rx_data(raw_tx, raw_rx)
+
+# replicate tx, rx per sampl
+tx_list = [tx] * num_samples  # each sample may have a list of receivers
+rx_list = [rx] * num_samples  # each sample may have a list of receivers
+
+if MODE == "single":
     K_cfg = 1
+elif MODE in {"multicast", "multi"}:
+    K_cfg = len(rx)
+elif MODE == "converge":
+    K_cfg = len(tx)
+else:  # "multiunicast"
+    if len(tx) != len(rx):
+        raise ValueError("tx and rx must have the same length for multiunicast.")
+    K_cfg = len(tx)
 
 sigma_vals = np.array([10 ** (-s / 10) for s in SNR])
 base = num_samples // len(sigma_vals)
@@ -173,15 +167,13 @@ else:
 # Choose K for the model:
 # - single: K_model = 1
 # - multicast: K_model = K_cfg (to enable per-receiver role channels; still one shared message)
-# - multi: K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
+# - multi, converge, multiunicast: K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
 if MODE == "single":
     K_model = 1
-elif MODE == "multicast":
+elif MODE in {"multicast", "multi", "converge", "multiunicast"}:
     K_model = K_cfg
-elif MODE == "multi":
-    K_model = max(1, K_cfg)
 else:
-    raise ValueError("MODE must be 'single', 'multicast', or 'multi'.")
+    raise ValueError("MODE must be 'multicast', 'multi', 'converge', or 'multiunicast'.")
 
 model = ChainedGNN(
     num_layers=L,

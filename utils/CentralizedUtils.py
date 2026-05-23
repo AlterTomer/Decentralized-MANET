@@ -78,14 +78,14 @@ def evaluate_centralized_adam(
     noise_std=None,
     lr: float = 0.1,
     num_iterations: int = 30,
-    problem: str = "single",  # "single", "multicast", or "multi"
+    problem: str = "single",  # "single", "multicast", "multi", "converge", or "multiunicast"
 ):
     """
     Evaluate centralized ADAM-based power allocation over a dataset for different
-    problem types (single, multicast, multi-commodity), using objective wrappers.
+    problem types, using objective wrappers.
 
     This function constructs a centralized optimization baseline that:
-      1. Initializes a learnable power tensor P (and Z for multi-commodity).
+      1. Initializes a learnable power tensor P (and Z for multi-message problems).
       2. Runs `classic_opt`, which repeatedly:
            - normalizes P (per-node power constraint),
            - evaluates the appropriate objective via a wrapper,
@@ -98,11 +98,8 @@ def evaluate_centralized_adam(
               - data.adj_matrix:    [n, n] adjacency (0/1 or bool).
               - data.links_matrix:  [B, n, n] complex channel matrix h.
               - data.sigma:         noise std (float or tensor).
-              - data.tx:            transmitter node index (int).
-              - data.rx:            for:
-                                      * "single": int (single Rx),
-                                      * "multicast": list[int] (receivers),
-                                      * "multi": list[int] (commodities).
+              - data.tx:            transmitter node index or indices.
+              - data.rx:            receiver node index or indices.
               - (optionally) data.B: number of bands; if absent, B argument is used.
 
         B (int):
@@ -121,19 +118,20 @@ def evaluate_centralized_adam(
 
         problem (str):
             One of:
-              - "single"    : single Tx→Rx unicast.
-              - "multicast" : single Tx, K receivers, same message.
-              - "multi"     : single Tx, K receivers, distinct messages (multi-commodity).
+              - "single"       : single Tx→Rx unicast.
+              - "multicast"    : single Tx, K receivers, same message.
+              - "multi"        : single Tx, K receivers, distinct messages.
+              - "converge"     : K transmitters, single Rx, distinct messages.
+              - "multiunicast" : K Tx-Rx pairs, distinct messages.
 
     Returns:
         rate_results (list[float]):
-            For each graph, the final objective value (e.g., sum-rate or multicast
-            bottleneck rate) obtained by centralized optimization.
+            For each graph, the final objective value obtained by centralized optimization.
 
         p_opt_results (list[torch.Tensor]):
             For each graph, the optimized power tensor:
-              - "single" / "multicast": [B, n, n].
-              - "multi"              : [B, K, n, n].
+              - "single" / "multicast": [B, n, n]
+              - "multi" / "converge" / "multiunicast": [B, K, n, n]
     """
     rate_results = []
     p_opt_results = []
@@ -158,10 +156,25 @@ def evaluate_centralized_adam(
         else:
             sigma = data.sigma
 
+        # normalize tx / rx containers a bit
+        tx_raw = data.tx
+        rx_raw = data.rx
+
+        if isinstance(tx_raw, torch.Tensor):
+            tx_raw = tx_raw.view(-1).tolist() if tx_raw.numel() > 1 else int(tx_raw.item())
+        if isinstance(rx_raw, torch.Tensor):
+            rx_raw = rx_raw.view(-1).tolist() if rx_raw.numel() > 1 else int(rx_raw.item())
+
+        # Fix DataLoader nesting for batch_size=1
+        if isinstance(tx_raw, (list, tuple)) and len(tx_raw) == 1 and isinstance(tx_raw[0], (list, tuple)):
+            tx_raw = tx_raw[0]
+        if isinstance(rx_raw, (list, tuple)) and len(rx_raw) == 1 and isinstance(rx_raw[0], (list, tuple)):
+            rx_raw = rx_raw[0]
+
         # ----- problem-specific structures + p_arr shape + objective wrapper -----
         if problem == "single":
-            # Single Tx→Rx: scalar rx
-            paths = find_all_paths(adj.cpu(), data.tx, data.rx)
+            # Single Tx→Rx
+            paths = find_all_paths(adj.cpu(), tx_raw, rx_raw)
             paths = paths_to_tensor(paths, device)
 
             # Initialize P: [B, n, n]
@@ -186,15 +199,11 @@ def evaluate_centralized_adam(
             )
 
         elif problem == "multicast":
-            # Multicast: rx is list of receivers
-            rx_list = data.rx
-            # Fix DataLoader nesting for batch_size=1
-            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
-                rx_list = rx_list[0]
+            # Single Tx, multiple Rx, same message
+            rx_list = list(rx_raw) if isinstance(rx_raw, (list, tuple)) else [rx_raw]
 
-            # Multicast subgraphs (Steiner-like) from Tx to all rx_list
-            subgraphs = find_multicast_subgraphs(adj.cpu(), data.tx, rx_list)
-            # Same subgraphs for each band (channel differs per band, topology same)
+            # Multicast subgraphs from Tx to all rx_list
+            subgraphs = find_multicast_subgraphs(adj.cpu(), tx_raw, rx_list)
             subgraphs_per_band = [subgraphs for _ in range(B)]
 
             # Initialize P: [B, n, n]
@@ -220,17 +229,13 @@ def evaluate_centralized_adam(
             )
 
         elif problem == "multi":
-            # Multi-commodity: Tx→rx_k, each k a different message
-            rx_list = data.rx
-            # Fix DataLoader nesting for batch_size=1
-            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
-                rx_list = rx_list[0]
+            # One Tx, K receivers, distinct messages
+            rx_list = list(rx_raw) if isinstance(rx_raw, (list, tuple)) else [rx_raw]
             K = len(rx_list)
 
-            # Build paths_k: list length K, each tensor of paths Tx→rx_k
             paths_k = []
             for rx_k in rx_list:
-                paths_k_k = find_all_paths(adj.cpu(), data.tx, rx_k)
+                paths_k_k = find_all_paths(adj.cpu(), tx_raw, int(rx_k))
                 paths_k_k = paths_to_tensor(paths_k_k, device)
                 paths_k.append(paths_k_k)
 
@@ -244,18 +249,135 @@ def evaluate_centralized_adam(
                             )
                             for _ in range(K)
                         ],
-                        dim=0,  # [K, n, n]
+                        dim=0,
                     )
                     for _ in range(B)
                 ],
-                dim=0,          # [B, K, n, n]
-            )
+                dim=0,
+            )  # [B, K, n, n]
 
-            # Initialize Z: routing/splitting variables, [B, K, n, n]
+            # Initialize Z: [B, K, n, n]
             Z0 = (
                 adj.bool()
-                .unsqueeze(0)  # [1, n, n]
-                .unsqueeze(0)  # [1, 1, n, n]
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .expand(B, K, n, n)
+                .to(device)
+                .float()
+            )
+            Z = nn.Parameter(Z0, requires_grad=True)
+
+            objective_fn = objective_multicommodity_wrapper
+            objective_kwargs = dict(
+                paths_k=paths_k,
+                B=B,
+                adj_mat=adj,
+                Z=Z,
+                tau_min=0.0,
+                tau_max=0.0,
+                per_band=False,
+                eps=1e-12,
+            )
+
+        elif problem == "converge":
+            # K transmitters, one Rx, distinct messages
+            tx_list = list(tx_raw) if isinstance(tx_raw, (list, tuple)) else [tx_raw]
+            if isinstance(rx_raw, (list, tuple)):
+                if len(rx_raw) != 1:
+                    raise ValueError("For problem='converge', rx must contain exactly one receiver.")
+                rx_scalar = int(rx_raw[0])
+            else:
+                rx_scalar = int(rx_raw)
+
+            K = len(tx_list)
+
+            paths_k = []
+            for tx_k in tx_list:
+                paths_k_k = find_all_paths(adj.cpu(), int(tx_k), rx_scalar)
+                paths_k_k = paths_to_tensor(paths_k_k, device)
+                paths_k.append(paths_k_k)
+
+            # Initialize P: [B, K, n, n]
+            p0 = torch.stack(
+                [
+                    torch.stack(
+                        [
+                            create_normalized_tensor(
+                                n, n, mask=adj, device=device
+                            )
+                            for _ in range(K)
+                        ],
+                        dim=0,
+                    )
+                    for _ in range(B)
+                ],
+                dim=0,
+            )  # [B, K, n, n]
+
+            # Initialize Z: [B, K, n, n]
+            Z0 = (
+                adj.bool()
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .expand(B, K, n, n)
+                .to(device)
+                .float()
+            )
+            Z = nn.Parameter(Z0, requires_grad=True)
+
+            objective_fn = objective_multicommodity_wrapper
+            objective_kwargs = dict(
+                paths_k=paths_k,
+                B=B,
+                adj_mat=adj,
+                Z=Z,
+                tau_min=0.0,
+                tau_max=0.0,
+                per_band=False,
+                eps=1e-12,
+            )
+
+        elif problem == "multiunicast":
+            # K Tx-Rx pairs, distinct messages
+            tx_list = list(tx_raw) if isinstance(tx_raw, (list, tuple)) else [tx_raw]
+            rx_list = list(rx_raw) if isinstance(rx_raw, (list, tuple)) else [rx_raw]
+
+            if len(tx_list) != len(rx_list):
+                raise ValueError(
+                    f"For problem='multiunicast', len(tx) must equal len(rx), "
+                    f"got {len(tx_list)} and {len(rx_list)}."
+                )
+
+            K = len(tx_list)
+
+            paths_k = []
+            for tx_k, rx_k in zip(tx_list, rx_list):
+                paths_k_k = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
+                paths_k_k = paths_to_tensor(paths_k_k, device)
+                paths_k.append(paths_k_k)
+
+            # Initialize P: [B, K, n, n]
+            p0 = torch.stack(
+                [
+                    torch.stack(
+                        [
+                            create_normalized_tensor(
+                                n, n, mask=adj, device=device
+                            )
+                            for _ in range(K)
+                        ],
+                        dim=0,
+                    )
+                    for _ in range(B)
+                ],
+                dim=0,
+            )  # [B, K, n, n]
+
+            # Initialize Z: [B, K, n, n]
+            Z0 = (
+                adj.bool()
+                .unsqueeze(0)
+                .unsqueeze(0)
                 .expand(B, K, n, n)
                 .to(device)
                 .float()
@@ -277,9 +399,9 @@ def evaluate_centralized_adam(
         else:
             raise ValueError(f"Unknown problem type: {problem}")
 
-        # ----- create optimizer (note: for multi we optimize P and Z) -----
+        # ----- create optimizer (for multi-message problems optimize both P and Z) -----
         p_arr = nn.Parameter(p0, requires_grad=True)
-        if problem == "multi":
+        if problem in {"multi", "converge", "multiunicast"}:
             optimizer = optim.AdamW([p_arr, Z], lr=lr)
         else:
             optimizer = optim.AdamW([p_arr], lr=lr)
@@ -309,64 +431,10 @@ def evaluate_centralized_adam(
     return rate_results, p_opt_results
 
 
-def evaluate_centralized_adam_single(data, B, lr=0.1, num_iterations=100):
-    """
-    Evaluate the centralized ADAM optimization strategy for a set of graphs.
-
-    This function performs ADAM-based power allocation optimization for each
-    graph in the loader, aiming to maximize the sum rate. For each graph:
-    - It initializes a learnable power allocation tensor `p_arr` of shape [B, n, n].
-    - Optimizes it over `num_iterations` steps using the given learning rate.
-    - Stores the final optimized power allocation and the corresponding rate.
-
-    Args:
-        loader (DataLoader or Iterable): A loader or iterable yielding graph data objects.
-            Each data object is expected to contain:
-                - data.adj_matrix: [n, n] binary adjacency matrix
-                - data.links_matrix: [B, n, n] complex link gains
-                - data.sigma: scalar noise standard deviation
-                - data.tx: transmitter node index (int)
-                - data.rx: receiver node index (int)
-        B (int): Number of frequency bands
-        lr (float): Learning rate for the ADAM optimizer (default 0.1)
-        num_iterations (int): Number of optimization steps per graph (default 100)
-
-    Returns:
-        rate_results (List[float]): Achieved sum rate for each graph after optimization
-        p_opt_results (List[Tensor]): Optimized power allocation tensors of shape [B, n, n] for each graph
-    """
-
-    adj = data.adj_matrix                # [n, n] binary adjacency matrix
-    links = data.links_matrix            # [B, n, n] complex channel gains
-    sigma = data.sigma                   # noise std
-    tx = data.tx                         # transmitter index
-    rx = data.rx                         # receiver index
-    paths = find_all_paths(adj, tx, rx)  # list of paths from Tx to Rx
-    paths = paths_to_tensor(paths, data.links_matrix.device)
-
-    # Initialize power allocation tensor [B, n, n] with masked entries
-    p_arr = torch.stack([
-        create_normalized_tensor(adj.shape[0], adj.shape[1], mask=adj) for _ in range(B)
-    ])
-    p_arr = nn.Parameter(p_arr, requires_grad=True)
-
-    # ADAM optimizer on p_arr
-    optimizer = optim.AdamW([p_arr], lr=lr)
-
-    # Optimize with respect to sum rate (maximize via negative loss)
-    p_opt = classic_opt(num_iterations, optimizer, adj, links, p_arr, sigma, paths, B)
-
-    # Evaluate and store the achieved rate
-    rate = calc_sum_rate(links, p_opt, sigma, paths, B)
-    # print(f'lower bound = {compute_lower_bound_single(data, sigma)}')
-
-    return rate, p_opt
-
-
 
 def compute_strongest_bottleneck_rate(
     dataset,
-    problem: str = "single",          # "single", "multicast", "multi"
+    problem: str = "single",          # "single", "multicast", "multi", "converge", "multiunicast"
     sigma_noise=None,
     multi_mode: str = "global",       # kept for compatibility, not used
 ):
@@ -387,10 +455,15 @@ def compute_strongest_bottleneck_rate(
          Use the multicast objective (mean over bands of max-subgraph
          bottleneck), evaluated at a one-hot p_min.
 
-    3) problem == "multi" (multi-commodity, K receivers, K messages):
-         For each receiver k, choose a bottleneck link as in the single case,
-         assign amplitude 1/K on that link for that commodity, and evaluate
-         the multi-commodity objective (reduced with 'mean' over commodities).
+    3) problem in {"multi", "converge", "multiunicast"}:
+         Multi-message case. For each message k, choose a bottleneck link
+         as in the single case, assign amplitude 1/K on that link for that
+         message, and evaluate the multi-commodity objective
+         (reduced with 'mean' over messages).
+
+         - "multi":        one Tx, K receivers
+         - "converge":     K transmitters, one Rx
+         - "multiunicast": K Tx-Rx pairs
     """
     lower_bounds = []
     p_min = []
@@ -404,9 +477,14 @@ def compute_strongest_bottleneck_rate(
         n     = adj.shape[0]
 
         sigma = sigma_noise if sigma_noise is not None else data.sigma
-        # Make sure sigma is a plain float for this analytic bound
         if isinstance(sigma, torch.Tensor):
             sigma = float(sigma.item())
+
+        # normalize tx/rx containers
+        if isinstance(tx, torch.Tensor):
+            tx = tx.view(-1).tolist() if tx.numel() > 1 else int(tx.item())
+        if isinstance(rx, torch.Tensor):
+            rx = rx.view(-1).tolist() if rx.numel() > 1 else int(rx.item())
 
         # ------------------------------------------------------------------
         # 1) SINGLE-UNICAST: bottleneck baseline
@@ -418,12 +496,12 @@ def compute_strongest_bottleneck_rate(
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            h_band_vals   = []   # per-band worst-path bottleneck
-            idx_band_best = []   # per-band (b,i,j) realizing h_b
+            h_band_vals   = []
+            idx_band_best = []
 
             for b in range(B):
-                band_path_mins = []   # path bottlenecks in band b
-                band_path_idx  = []   # (b,i,j) for each path's bottleneck
+                band_path_mins = []
+                band_path_idx  = []
 
                 for path in paths:
                     if len(path) < 2:
@@ -434,11 +512,10 @@ def compute_strongest_bottleneck_rate(
                     rows_t = torch.tensor(rows, dtype=torch.long)
                     cols_t = torch.tensor(cols, dtype=torch.long)
 
-                    gains = torch.abs(links[b][rows_t, cols_t]) ** 2  # [L]
+                    gains = torch.abs(links[b][rows_t, cols_t]) ** 2
                     if gains.numel() == 0:
                         continue
 
-                    # bottleneck along this path
                     min_val, argmin = gains.min(dim=0)
                     min_val = float(min_val.item())
                     i_min, j_min = edge_list[argmin.item()]
@@ -460,18 +537,14 @@ def compute_strongest_bottleneck_rate(
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            # Pick best band according to the bottleneck definition
             h_best = max(h_band_vals)
 
-            # Build one-hot power tensor
             p = torch.zeros_like(links)
             best_band_idx = h_band_vals.index(h_best)
             b_best, i_best, j_best = idx_band_best[best_band_idx]
             p[b_best, i_best, j_best] = 1.0
             p_min.append(p)
 
-            # NEW: evaluate with the *same* objective as the GNN,
-            #      but ignoring zero-power edges in the min.
             paths_tensor = paths_to_tensor(paths, adj.device)
             rate = calc_sum_rate(
                 h_arr=links,
@@ -481,11 +554,11 @@ def compute_strongest_bottleneck_rate(
                 B=B,
                 tau=0.0,
                 per_band=False,
-                ignore_zero_edges=True,     # <<< important for one-hot p
+                ignore_zero_edges=True,
                 power_threshold=1e-8,
             )
             lower_bounds.append(float(rate.item()))
-            continue  # next graph
+            continue
 
         # ------------------------------------------------------------------
         # 2) MULTICAST: bottleneck baseline
@@ -502,8 +575,8 @@ def compute_strongest_bottleneck_rate(
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            h_band_vals   = []  # per-band worst-subgraph bottleneck
-            idx_band_best = []  # per-band (b,i,j)
+            h_band_vals   = []
+            idx_band_best = []
 
             for b in range(B):
                 band_sub_min_vals = []
@@ -512,14 +585,14 @@ def compute_strongest_bottleneck_rate(
                 for S in subgraphs:
                     if S is None or not torch.any(S):
                         continue
-                    edge_idx = S.nonzero(as_tuple=False)  # [E, 2]
+                    edge_idx = S.nonzero(as_tuple=False)
                     if edge_idx.numel() == 0:
                         continue
 
                     rows = edge_idx[:, 0]
                     cols = edge_idx[:, 1]
 
-                    gains = torch.abs(links[b][rows, cols]) ** 2  # [E]
+                    gains = torch.abs(links[b][rows, cols]) ** 2
                     min_val, argmin = gains.min(dim=0)
                     min_val = float(min_val.item())
                     i_min = int(rows[argmin].item())
@@ -529,7 +602,6 @@ def compute_strongest_bottleneck_rate(
                     band_sub_idx.append((b, i_min, j_min))
 
                 if band_sub_min_vals:
-                    # Worst multicast subgraph in band b
                     h_b = min(band_sub_min_vals)
                     best_idx = band_sub_min_vals.index(h_b)
                     h_band_vals.append(h_b)
@@ -545,17 +617,14 @@ def compute_strongest_bottleneck_rate(
 
             h_best = max(h_band_vals)
 
-            # One-hot power tensor on the decisive edge
             p = torch.zeros_like(links)
             best_band_idx = h_band_vals.index(h_best)
             b_best, i_best, j_best = idx_band_best[best_band_idx]
             p[b_best, i_best, j_best] = 1.0
             p_min.append(p)
 
-            # Subgraphs list is the same for all bands in this baseline
             subgraphs_per_band = [subgraphs for _ in range(B)]
 
-            # NEW: use multicast objective with ignore_zero_edges=True
             rate = objective_multicast(
                 h=links,
                 p=p,
@@ -566,46 +635,66 @@ def compute_strongest_bottleneck_rate(
                 tau_min=0.0,
                 tau_max=0.0,
                 per_band=False,
-                ignore_zero_edges=True,     # <<< key
+                ignore_zero_edges=True,
                 power_threshold=1e-8,
             )
             lower_bounds.append(float(rate.item()))
-            continue  # next graph
+            continue
 
         # ------------------------------------------------------------------
-        # 3) MULTI-COMMODITY: K commodities baseline
+        # 3) MULTI-MESSAGE: "multi" / "converge" / "multiunicast"
         # ------------------------------------------------------------------
-        if problem == "multi":
-            # rx can be list or single index
-            if isinstance(rx, (list, tuple)):
-                rx_list = list(rx)
-            else:
-                rx_list = [rx]
-            K = len(rx_list)
+        if problem in {"multi", "converge", "multiunicast"}:
+            # Build (tx_k, rx_k) pairs for each message k
+            if problem == "multi":
+                rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+                tx_list = [tx] * len(rx_list) if not isinstance(tx, (list, tuple)) else list(tx)
+                if len(tx_list) == 1 and len(rx_list) > 1:
+                    tx_list = tx_list * len(rx_list)
+
+            elif problem == "converge":
+                tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                if isinstance(rx, (list, tuple)):
+                    if len(rx) != 1:
+                        raise ValueError("For problem='converge', rx must contain exactly one receiver.")
+                    rx_scalar = int(rx[0])
+                else:
+                    rx_scalar = int(rx)
+                rx_list = [rx_scalar] * len(tx_list)
+
+            else:  # multiunicast
+                tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+                if len(tx_list) != len(rx_list):
+                    raise ValueError(
+                        f"For problem='multiunicast', len(tx) must equal len(rx), "
+                        f"got {len(tx_list)} and {len(rx_list)}."
+                    )
+
+            K = len(tx_list)
 
             if K == 0:
                 lower_bounds.append(0.0)
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            # Precompute all paths for each commodity and store as tensors
+            # Precompute all paths for each message
             paths_k_list = []
-            for rx_k in rx_list:
-                paths_k = find_all_paths(adj, tx, rx_k)
+            for tx_k, rx_k in zip(tx_list, rx_list):
+                paths_k = find_all_paths(adj, int(tx_k), int(rx_k))
                 if not paths_k:
                     paths_k_list.append(None)
                 else:
                     paths_k_list.append(paths_to_tensor(paths_k, adj.device))
 
-            # For each commodity k, find its bottleneck edge (b*, i*, j*)
-            chosen_edges = [None] * K  # entries: (b_best, i_best, j_best) or None
+            chosen_edges = [None] * K
 
             for k, paths_k_tensor in enumerate(paths_k_list):
                 if paths_k_tensor is None:
-                    continue  # this commodity has no route
+                    continue
 
-                edge_start = paths_k_tensor[:, :-1]  # [P_k, L-1]
-                edge_end   = paths_k_tensor[:,  1:]  # [P_k, L-1]
+                edge_start = paths_k_tensor[:, :-1]
+                edge_end   = paths_k_tensor[:,  1:]
                 if edge_start.numel() == 0:
                     continue
 
@@ -619,7 +708,6 @@ def compute_strongest_bottleneck_rate(
                     for row in range(edge_start.shape[0]):
                         es = edge_start[row]
                         ee = edge_end[row]
-                        # valid edges in this path
                         valid_mask = (es >= 0) & (ee >= 0)
                         if not torch.any(valid_mask):
                             continue
@@ -627,7 +715,7 @@ def compute_strongest_bottleneck_rate(
                         rows = es[valid_mask]
                         cols = ee[valid_mask]
 
-                        gains = torch.abs(links[b][rows, cols]) ** 2  # [L_path]
+                        gains = torch.abs(links[b][rows, cols]) ** 2
                         if gains.numel() == 0:
                             continue
 
@@ -640,7 +728,7 @@ def compute_strongest_bottleneck_rate(
                         band_path_idx.append((b, i_min, j_min))
 
                     if band_path_mins:
-                        h_b = min(band_path_mins)  # worst path in band b
+                        h_b = min(band_path_mins)
                         best_idx = band_path_mins.index(h_b)
                         h_band_vals_k.append(h_b)
                         idx_band_best_k.append(band_path_idx[best_idx])
@@ -649,13 +737,12 @@ def compute_strongest_bottleneck_rate(
                         idx_band_best_k.append(None)
 
                 if all(v == float("-inf") for v in h_band_vals_k):
-                    continue  # no feasible band for this commodity
+                    continue
 
-                h_k = max(h_band_vals_k)   # best band for commodity k
+                h_k = max(h_band_vals_k)
                 best_band_idx = h_band_vals_k.index(h_k)
-                chosen_edges[k] = idx_band_best_k[best_band_idx]  # (b_best, i_best, j_best)
+                chosen_edges[k] = idx_band_best_k[best_band_idx]
 
-            # Build p and z for multi-commodity objective: [B, K, n, n]
             p_multi = torch.zeros((B, K, n, n), dtype=links.dtype, device=links.device)
             z_multi = torch.zeros_like(p_multi, dtype=links.dtype)
 
@@ -663,17 +750,14 @@ def compute_strongest_bottleneck_rate(
                 if edge is None:
                     continue
                 b_best, i_best, j_best = edge
-                # amplitude 1/K for each commodity's chosen link
                 p_multi[b_best, k, i_best, j_best] = 1.0 / K
                 z_multi[b_best, k, i_best, j_best] = 1.0
 
-            # If no commodity has a path: rate = 0
             if not any(edge is not None for edge in chosen_edges):
                 lower_bounds.append(0.0)
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            # NEW: evaluate multi-commodity objective, ignoring zero-power edges
             rate = objective_multicommodity(
                 h=links,
                 p=p_multi,
@@ -683,15 +767,14 @@ def compute_strongest_bottleneck_rate(
                 paths_k=paths_k_list,
                 tau_min=0.0,
                 tau_max=0.0,
-                reduce="mean",              # average over commodities
+                reduce="mean",
                 per_band=False,
                 outage_as_neg_inf=False,
-                ignore_zero_edges=True,     # <<< key
+                ignore_zero_edges=True,
                 power_threshold=1e-8,
             )
 
             lower_bounds.append(float(rate.item()))
-            # For consistency with single/multicast, store total power per edge:
             p_min.append(p_multi.sum(dim=1))   # [B, n, n]
             continue
 
@@ -709,14 +792,16 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
     """
     Compute the equal-power baseline rate depending on the problem type:
 
-        - SINGLE:      One Tx → one Rx, objective=calc_sum_rate
-        - MULTICAST:   One Tx → many Rx, objective=objective_multicast
-        - MULTI:       One Tx → K Rx w/ different flows, objective=objective_multicommodity
+        - SINGLE:        One Tx -> one Rx, objective = calc_sum_rate
+        - MULTICAST:     One Tx -> many Rx, same message, objective = objective_multicast
+        - MULTI:         One Tx -> K Rx, different messages, objective = objective_multicommodity
+        - CONVERGE:      K Tx -> one Rx, different messages, objective = objective_multicommodity
+        - MULTIUNICAST:  K Tx-Rx pairs, different messages, objective = objective_multicommodity
 
     Uses the same power normalization rule as the model and centralized ADAM.
     """
     rate_bounds = []
-    p_store = []  # keep the actual equal-power P (and Z if multi)
+    p_store = []  # keep the actual equal-power P (and Z for multi-message problems)
 
     for data in dataset:
         device = data.links_matrix.device
@@ -731,6 +816,8 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             sigma = data.sigma
         else:
             sigma = sigma_noise
+
+        sigma_t = torch.tensor(sigma, device=device) if not isinstance(sigma, torch.Tensor) else sigma.to(device)
 
         # --------------------------
         # SINGLE
@@ -751,7 +838,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             rate = calc_sum_rate(
                 h_arr=h,
                 p_arr=P,
-                sigma=torch.tensor(sigma, device=device),
+                sigma=sigma_t,
                 paths_tensor=paths,
                 B=B,
                 tau=0.0,
@@ -767,6 +854,8 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
         # --------------------------
         if problem == "multicast":
             rx_list = data.rx
+            if isinstance(rx_list, torch.Tensor):
+                rx_list = rx_list.view(-1).tolist()
             if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
                 rx_list = rx_list[0]
 
@@ -785,7 +874,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             rate = objective_multicast(
                 h=h,
                 p=P,
-                sigma=torch.tensor(sigma, device=device),
+                sigma=sigma_t,
                 adj=adj,
                 subgraphs_per_band=subgraphs_per_band,
                 tau_min=0.0,
@@ -798,19 +887,52 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             continue
 
         # --------------------------
-        # MULTI-COMMODITY
+        # MULTI-MESSAGE:
+        # "multi" / "converge" / "multiunicast"
         # --------------------------
-        if problem == "multi":
-            rx_list = data.rx
-            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
-                rx_list = rx_list[0]
-            K = len(rx_list)
+        if problem in {"multi", "converge", "multiunicast"}:
+            tx = data.tx
+            rx = data.rx
+
+            if isinstance(tx, torch.Tensor):
+                tx = tx.view(-1).tolist() if tx.numel() > 1 else int(tx.item())
+            if isinstance(rx, torch.Tensor):
+                rx = rx.view(-1).tolist() if rx.numel() > 1 else int(rx.item())
+
+            # Build aligned (tx_k, rx_k) pairs
+            if problem == "multi":
+                rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+                tx_list = [int(tx)] * len(rx_list)
+
+            elif problem == "converge":
+                tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                if isinstance(rx, (list, tuple)):
+                    if len(rx) != 1:
+                        raise ValueError("For problem='converge', rx must contain exactly one receiver.")
+                    rx_scalar = int(rx[0])
+                else:
+                    rx_scalar = int(rx)
+                rx_list = [rx_scalar] * len(tx_list)
+
+            else:  # multiunicast
+                tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+                if len(tx_list) != len(rx_list):
+                    raise ValueError(
+                        f"For problem='multiunicast', len(tx) must equal len(rx), "
+                        f"got {len(tx_list)} and {len(rx_list)}."
+                    )
+
+            K = len(tx_list)
 
             paths_k = []
             has_path = False
-            for rx_k in rx_list:
-                pk = find_all_paths(adj.cpu(), data.tx, rx_k)
-                paths_k.append(paths_to_tensor(pk, device) if pk else torch.empty((0,0), device=device, dtype=torch.long))
+            for tx_k, rx_k in zip(tx_list, rx_list):
+                pk = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
+                paths_k.append(
+                    paths_to_tensor(pk, device) if pk else
+                    torch.empty((0, 0), device=device, dtype=torch.long)
+                )
                 if pk:
                     has_path = True
 
@@ -821,9 +943,11 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             # equal power P: shape [B,K,n,n]
             P = torch.zeros(B, K, n, n, device=device)
             for k in range(K):
-                P[:, k] = init_equal_power(torch.zeros(B, n, n), adj)
+                P[:, k] = init_equal_power(torch.zeros(B, n, n, device=device), adj)
 
-            P = normalize_power(P, adj).to(device)
+            # normalize per-message
+            for k in range(K):
+                P[:, k] = normalize_power(P[:, k], adj).to(device)
 
             # routing matrix initialized to binary adjacency mask
             Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, K, n, n).to(device)
@@ -832,7 +956,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
                 h=h,
                 p=P,
                 z=Z,
-                sigma=torch.tensor(sigma, device=device),
+                sigma=sigma_t,
                 adj=adj,
                 paths_k=paths_k,
                 tau_min=0.0,
@@ -868,16 +992,19 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
       - Allocate P[b,u,v] = 1/sqrt(B) for edges (u->v) in this subgraph.
       - Feed P and subgraphs_per_band into objective_multicast (after normalize_power).
 
-    MULTI (multicommodity):
-      - For each receiver rx_k:
-          - Use find_all_paths to get Tx->rx_k paths.
-          - Pick a shortest path (ties broken randomly).
-          - Allocate P[b,k,u,v] = 1/sqrt(B) on each hop of that path.
-      - Pass P (and routing Z from adjacency) into objective_multicommodity (after normalize_power).
+    MULTI / CONVERGE / MULTIUNICAST:
+      - Build one message-specific shortest path per commodity/message.
+      - Allocate P[b,k,u,v] = 1/sqrt(B) on each hop of the chosen path.
+      - Pass P (and routing Z from adjacency) into objective_multicommodity
+        (after per-message normalization).
+
+        * MULTI:         one Tx, K receivers
+        * CONVERGE:      K transmitters, one Rx
+        * MULTIUNICAST:  K Tx-Rx pairs
 
     Returns:
       rate_bounds: np.ndarray of shape [len(dataset)]
-      p_store:     list of P (and Z for multi) tensors for debugging/inspection.
+      p_store:     list of P (and Z for multi-message problems) tensors.
     """
     rate_bounds = []
     p_store = []
@@ -892,6 +1019,7 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
         n = adj.shape[0]
 
         sigma = data.sigma if (sigma_noise is False) else sigma_noise
+        sigma_t = torch.tensor(sigma, device=device) if not isinstance(sigma, torch.Tensor) else sigma.to(device)
 
         # --------------------------
         # SINGLE
@@ -902,7 +1030,6 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
                 rate_bounds.append(0.0)
                 continue
 
-            # shortest by number of edges
             lengths = [len(p) - 1 for p in all_paths]
             min_len = min(lengths)
             shortest_paths = [p for p, L in zip(all_paths, lengths) if L == min_len]
@@ -911,11 +1038,11 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
             P = _build_P_from_path_single(h, adj, chosen_path)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
 
-            paths_tensor = paths_to_tensor(all_paths, device)    # objective still uses all paths
+            paths_tensor = paths_to_tensor(all_paths, device)
             rate = calc_sum_rate(
                 h_arr=h,
                 p_arr=P,
-                sigma=torch.tensor(sigma, device=device),
+                sigma=sigma_t,
                 paths_tensor=paths_tensor,
                 B=B,
                 tau=0.0,
@@ -931,6 +1058,8 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
         # --------------------------
         if problem == "multicast":
             rx_list = data.rx
+            if isinstance(rx_list, torch.Tensor):
+                rx_list = rx_list.view(-1).tolist()
             if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
                 rx_list = rx_list[0]
 
@@ -939,23 +1068,20 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
                 rate_bounds.append(0.0)
                 continue
 
-            # Choose the subgraph with the smallest number of links
             best_sg = _select_shortest_subgraph(subgraphs)
             if best_sg is None:
                 rate_bounds.append(0.0)
                 continue
 
-            # Use ONLY this subgraph in all bands
             subgraphs_per_band = [[best_sg] for _ in range(B)]
 
-            # Build P based on that subgraph
             P = _build_P_from_multicast_subgraph(h, adj, best_sg)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
 
             rate = objective_multicast(
                 h=h,
                 p=P,
-                sigma=torch.tensor(sigma, device=device),
+                sigma=sigma_t,
                 adj=adj,
                 subgraphs_per_band=subgraphs_per_band,
                 tau_min=0.0,
@@ -968,19 +1094,49 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
             continue
 
         # --------------------------
-        # MULTI-COMMODITY
+        # MULTI-MESSAGE:
+        # "multi" / "converge" / "multiunicast"
         # --------------------------
-        if problem == "multi":
-            rx_list = data.rx
-            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
-                rx_list = rx_list[0]
-            K = len(rx_list)
+        if problem in {"multi", "converge", "multiunicast"}:
+            tx = data.tx
+            rx = data.rx
 
-            # Collect all paths for each commodity (same as in equal-power)
+            if isinstance(tx, torch.Tensor):
+                tx = tx.view(-1).tolist() if tx.numel() > 1 else int(tx.item())
+            if isinstance(rx, torch.Tensor):
+                rx = rx.view(-1).tolist() if rx.numel() > 1 else int(rx.item())
+
+            # Build aligned (tx_k, rx_k) pairs
+            if problem == "multi":
+                rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+                tx_list = [int(tx)] * len(rx_list)
+
+            elif problem == "converge":
+                tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                if isinstance(rx, (list, tuple)):
+                    if len(rx) != 1:
+                        raise ValueError("For problem='converge', rx must contain exactly one receiver.")
+                    rx_scalar = int(rx[0])
+                else:
+                    rx_scalar = int(rx)
+                rx_list = [rx_scalar] * len(tx_list)
+
+            else:  # multiunicast
+                tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+                rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+                if len(tx_list) != len(rx_list):
+                    raise ValueError(
+                        f"For problem='multiunicast', len(tx) must equal len(rx), "
+                        f"got {len(tx_list)} and {len(rx_list)}."
+                    )
+
+            K = len(tx_list)
+
+            # Collect all paths for each message
             paths_k_lists = []
             has_path = False
-            for rx_k in rx_list:
-                pk = find_all_paths(adj.cpu(), data.tx, rx_k)
+            for tx_k, rx_k in zip(tx_list, rx_list):
+                pk = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
                 paths_k_lists.append(pk if pk else [])
                 if pk:
                     has_path = True
@@ -989,9 +1145,13 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
                 rate_bounds.append(0.0)
                 continue
 
-            # Build P from shortest paths per commodity
+            # Build P from shortest paths per message
+            # Assumes helper accepts one list of paths per message, regardless of problem semantics
             P = _build_P_from_paths_multi(h, adj, paths_k_lists, K)  # [B,K,n,n]
-            P = normalize_power(P, adj).to(device)
+
+            # normalize per message
+            for k in range(K):
+                P[:, k] = normalize_power(P[:, k], adj).to(device)
 
             # paths_k in tensor form for the objective
             paths_k_tensors = [
@@ -999,14 +1159,13 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
                 for pk in paths_k_lists
             ]
 
-            # routing matrix same as in equal-power baseline
             Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, K, n, n).to(device)
 
             rate = objective_multicommodity(
                 h=h,
                 p=P,
                 z=Z,
-                sigma=torch.tensor(sigma, device=device),
+                sigma=sigma_t,
                 adj=adj,
                 paths_k=paths_k_tensors,
                 tau_min=0.0,
@@ -1022,7 +1181,6 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
         raise ValueError(f"Unknown problem='{problem}'")
 
     return np.array(rate_bounds), p_store
-
 
 def _build_P_from_path_single(h, adj, path_nodes):
     """

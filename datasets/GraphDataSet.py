@@ -172,11 +172,11 @@ class GraphNetDataset(Dataset):
         self.K = int(K) if K is not None else None
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        valid_modes = {"single", "multicast", "multi", "convergencecast", "mesh"}
+        valid_modes = {"single", "multicast", "multi", "converge", "multiunicast"}
         if self.problem not in valid_modes:
             raise ValueError(f"problem must be one of {valid_modes}, got {self.problem}")
 
-        self.multi_like = (self.problem in {"multi", "convergencecast", "mesh"})
+        self.multi_like = (self.problem in {"multi", "converge", "multiunicast"})
 
         # ---- sanity around K ----
         if self.problem == "single":
@@ -316,12 +316,12 @@ class GraphNetDataset(Dataset):
             data.tx = int(tx_i)
             data.rx = self._to_list(rx_i)[:K_eff]
 
-        elif self.problem == "convergencecast":
+        elif self.problem == "converge":
             # tx is list length K, rx is shared int
             data.tx = self._to_list(tx_i)[:K_eff]
             data.rx = int(rx_i)
 
-        else:  # mesh
+        else:  # multiunicast
             # tx list length K, rx list length K, paired by index
             data.tx = self._to_list(tx_i)[:K_eff]
             data.rx = self._to_list(rx_i)[:K_eff]

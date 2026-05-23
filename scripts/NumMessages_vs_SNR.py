@@ -5,6 +5,7 @@ from utils.DataUtils import generate_graph_data
 from utils.ComparisonUtils import evaluate_models_across_snr
 from utils.EstimationUtils import masked_band_variance_from_dataset, precompute_csi_estimates
 from utils.ConfigUtils import parse_args, load_ini_config
+from utils.ParseUtils import parse_tx_rx_data
 from visualization.GraphingAux import plot_models_mean_rate_vs_snr
 import pickle
 
@@ -21,7 +22,6 @@ SEED = int(train_params["SEED"])
 MODE = train_params["mode"]  # "single" | "multicast" | "multi"
 B = int(train_params["B"])
 n = int(train_params["n"])
-tx = int(train_params["tx"])
 sigma = float(train_params["sigma"])
 DROPOUT = float(train_params["dropout"])
 num_samples = int(train_params["num samples"])
@@ -39,39 +39,44 @@ fig_data_path = files_params["fig data path"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 n_list = [n] * num_samples
-tx_list = [tx] * num_samples
-# rx can be int OR a list in the ini; handle both
-_raw_rx = train_params["rx"].strip()
-if _raw_rx.startswith("[") and _raw_rx.endswith("]"):
-    rx = [int(x) for x in _raw_rx[1:-1].replace(" ", "").split(",") if x]
-elif "," in _raw_rx:
-    rx = [int(x) for x in _raw_rx.replace(" ", "").split(",") if x]
-else:
-    rx = int(_raw_rx)
+# tx, rx can be int OR a list in the ini; handle both
+raw_tx = train_params["tx"].strip()
+raw_rx = train_params["rx"].strip()
+tx, rx = parse_tx_rx_data(raw_tx, raw_rx)
 
-# replicate rx per sample (int or list)
-if isinstance(rx, list):
-    rx_list = [rx] * num_samples  # each sample may have a list of receivers
-    K_cfg = len(rx)
-else:
-    rx_list = [rx] * num_samples
+# replicate tx, rx per sampl
+tx_list = [tx] * num_samples  # each sample may have a list of receivers
+rx_list = [rx] * num_samples  # each sample may have a list of receivers
+
+if MODE == "single":
     K_cfg = 1
+elif MODE in {"multicast", "multi"}:
+    K_cfg = len(rx)
+elif MODE == "converge":
+    K_cfg = len(tx)
+else:  # "multiunicast"
+    if len(tx) != len(rx):
+        raise ValueError("tx and rx must have the same length for multiunicast.")
+    K_cfg = len(tx)
+
+# Choose K for the model:
+# - single: K_model = 1
+# - multicast: K_model = K_cfg (to enable per-receiver role channels; still one shared message)
+# - multi, converge, multiunicast: K_model = K_cfg (distinct messages, produces [B,K,n,n] + Z)
 if MODE == "single":
     K_model = 1
-elif MODE == "multicast":
+elif MODE in {"multicast", "multi", "converge", "multiunicast"}:
     K_model = K_cfg
-elif MODE == "multi":
-    K_model = max(1, K_cfg)
 else:
-    raise ValueError("MODE must be 'single', 'multicast', or 'multi'.")
+    raise ValueError("MODE must be 'multicast', 'multi', 'converge', or 'multiunicast'.")
 
 _raw_L = train_params["L"].strip()
 if _raw_L.startswith("[") and _raw_L.endswith("]"):
     L_lst = [int(x) for x in _raw_L[1:-1].replace(" ", "").split(",") if x]
-elif "," in _raw_rx:
+elif "," in _raw_L:
     L_lst = [int(x) for x in _raw_L.replace(" ", "").split(",") if x]
 else:
-    L_lst = int(_raw_rx)
+    L_lst = int(_raw_L)
 
 sigma_list = [sigma] * num_samples
 dataset = generate_graph_data(
