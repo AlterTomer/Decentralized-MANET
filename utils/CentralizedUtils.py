@@ -9,11 +9,10 @@ from utils.MetricUtils import calc_sum_rate, objective_single_wrapper
 from Multicast.SubGraphs import find_multicast_subgraphs
 from Multicast.Objective import objective_multicast_wrapper, objective_multicast
 from Multicommodity.Objective import  objective_multicommodity_wrapper, objective_multicommodity
+from MANET_FFN.MANET_FFN_Utils import *
+from MANET_FFN.main import select_ffn_objective
 
-
-#=======================================================================================================================
-# Centralized Optimization
-#=======================================================================================================================
+#========================================== Centralized Optimizer ======================================================
 def classic_opt(
     num_iterations,
     optimizer,
@@ -122,13 +121,13 @@ def evaluate_centralized_adam(
               - "multicast"    : single Tx, K receivers, same message.
               - "multi"        : single Tx, K receivers, distinct messages.
               - "converge"     : K transmitters, single Rx, distinct messages.
-              - "multiunicast" : K Tx-Rx pairs, distinct messages.
+              - "Multiunicast" : K Tx-Rx pairs, distinct messages.
 
     Returns:
         rate_results (list[float]):
             For each graph, the final objective value obtained by centralized optimization.
 
-        p_opt_results (list[torch.Tensor]):
+        P_opt_results (list[torch.Tensor]):
             For each graph, the optimized power tensor:
               - "single" / "multicast": [B, n, n]
               - "multi" / "converge" / "multiunicast": [B, K, n, n]
@@ -431,12 +430,74 @@ def evaluate_centralized_adam(
     return rate_results, p_opt_results
 
 
+# =============================================== Centralized FFN ======================================================
+@torch.no_grad()
+def evaluate_ffn(
+    model,
+    loader,
+    problem="single",
+):
+    """
+    Evaluate a trained FFN model.
 
-def compute_strongest_bottleneck_rate(
+    Args
+    ----
+    model : FFNPowerAllocator
+        Trained FFN model.
+
+    loader : DataLoader
+        Evaluation dataset.
+
+    problem : str
+        Communication framework.
+
+    Returns
+    -------
+    rate_results : list[float]
+        Achieved rate for each graph.
+
+    p_results : list[torch.Tensor]
+        Predicted feasible allocations.
+    """
+
+    model.eval()
+    objective_fn = select_ffn_objective(problem)
+    rate_results = []
+    p_results = []
+
+    device = next(model.parameters()).device
+
+    for batch in loader:
+
+        batch = move_batch_to_device(batch, device)
+        h, adj, sigma, tx, rx = unpack_batch(batch)
+
+        # FFN prediction
+        p_raw = model(h).squeeze(0)
+
+        # Projection
+        p = normalize_power(p_raw, adj)
+
+        # Objective evaluation
+        rate = objective_fn(
+            h=h,
+            p=p,
+            sigma=sigma,
+            adj=adj,
+            tx=tx,
+            rx=rx,
+        )
+
+        rate_results.append(float(rate.item()))
+        p_results.append(p.detach().cpu())
+
+    return rate_results, p_results
+
+ # ============================= Centralized Bottleneck Rate ===========================================================
+def compute_centralized_best_single_channel_rate(
     dataset,
     problem: str = "single",          # "single", "multicast", "multi", "converge", "multiunicast"
     sigma_noise=None,
-    multi_mode: str = "global",       # kept for compatibility, not used
 ):
     """
     Compute a bottleneck-based lower bound for each graph in the dataset.
@@ -447,11 +508,11 @@ def compute_strongest_bottleneck_rate(
 
     Problems:
 
-    1) problem == "single":
+    1) "single":
          Use the calc_sum_rate objective (mean over bands of best path),
          evaluated at a one-hot power tensor p_min (one active edge).
 
-    2) problem == "multicast":
+    2) "multicast":
          Use the multicast objective (mean over bands of max-subgraph
          bottleneck), evaluated at a one-hot p_min.
 
@@ -461,8 +522,8 @@ def compute_strongest_bottleneck_rate(
          message, and evaluate the multi-commodity objective
          (reduced with 'mean' over messages).
 
-         - "multi":        one Tx, K receivers
-         - "converge":     K transmitters, one Rx
+         - "Multi": one Tx, K receivers
+         - "converge": K transmitters, one Rx
          - "multiunicast": K Tx-Rx pairs
     """
     lower_bounds = []
@@ -524,7 +585,7 @@ def compute_strongest_bottleneck_rate(
                     band_path_idx.append((b, i_min, j_min))
 
                 if band_path_mins:
-                    h_b = min(band_path_mins)
+                    h_b = max(band_path_mins)
                     best_idx = band_path_mins.index(h_b)
                     h_band_vals.append(h_b)
                     idx_band_best.append(band_path_idx[best_idx])
@@ -602,7 +663,7 @@ def compute_strongest_bottleneck_rate(
                     band_sub_idx.append((b, i_min, j_min))
 
                 if band_sub_min_vals:
-                    h_b = min(band_sub_min_vals)
+                    h_b = max(band_sub_min_vals)
                     best_idx = band_sub_min_vals.index(h_b)
                     h_band_vals.append(h_b)
                     idx_band_best.append(band_sub_idx[best_idx])
@@ -728,7 +789,7 @@ def compute_strongest_bottleneck_rate(
                         band_path_idx.append((b, i_min, j_min))
 
                     if band_path_mins:
-                        h_b = min(band_path_mins)
+                        h_b = max(band_path_mins)
                         best_idx = band_path_mins.index(h_b)
                         h_band_vals_k.append(h_b)
                         idx_band_best_k.append(band_path_idx[best_idx])
@@ -786,7 +847,457 @@ def compute_strongest_bottleneck_rate(
     return np.array(lower_bounds, dtype=float), p_min
 
 
+# ============================== Decentralized Bottleneck Rate =========================================================
 
+def distributed_widest_path_single_band(
+    adj,
+    channel_power_b,
+    tx,
+    rx,
+    max_iters=None,
+    eps=1e-12,
+):
+    """
+    Distributed widest-path / max-min bottleneck routing on one band.
+
+    Each node maintains a local label q_i, interpreted as the best bottleneck
+    value from node i to the destination rx.
+
+    Update rule:
+        q_i <- max_{j in N(i)} min(|h_ij|^2, q_j)
+
+    Parameters
+    ----------
+    adj : torch.Tensor
+        Directed adjacency matrix [n, n].
+
+    channel_power_b : torch.Tensor
+        Channel powers on one band [n, n], i.e. |h_b|^2.
+
+    tx : int
+        Source node.
+
+    rx : int
+        Destination node.
+
+    max_iters : int or None
+        Number of local update rounds. If None, uses n - 1.
+
+    eps : float
+        Numerical tolerance.
+
+    Returns
+    -------
+    path : list[int] or None
+        Selected path from tx to rx.
+
+    bottleneck : float
+        Bottleneck value along the selected path.
+
+    next_hop : torch.Tensor
+        Next-hop table [n].
+    """
+    device = adj.device
+    n = adj.shape[0]
+
+    tx = int(tx)
+    rx = int(rx)
+
+    if max_iters is None:
+        max_iters = n - 1
+
+    q = torch.zeros(n, device=device)
+    q[rx] = float("inf")
+
+    next_hop = -torch.ones(n, dtype=torch.long, device=device)
+
+    for _ in range(max_iters):
+        q_old = q.clone()
+
+        for i in range(n):
+            if i == rx:
+                continue
+
+            neigh = torch.where(adj[i] > 0)[0]
+            if neigh.numel() == 0:
+                continue
+
+            candidate_vals = torch.minimum(
+                channel_power_b[i, neigh],
+                q_old[neigh],
+            )
+
+            val, idx = candidate_vals.max(dim=0)
+
+            if val > q[i] + eps:
+                q[i] = val
+                next_hop[i] = neigh[idx]
+
+        if torch.allclose(q, q_old, atol=eps, rtol=0.0):
+            break
+
+    if q[tx] <= eps:
+        return None, 0.0, next_hop
+
+    path = [tx]
+    cur = tx
+    visited = {cur}
+
+    while cur != rx:
+        nh = int(next_hop[cur].item())
+
+        if nh < 0 or nh in visited:
+            return None, 0.0, next_hop
+
+        path.append(nh)
+        visited.add(nh)
+        cur = nh
+
+    return path, float(q[tx].item()), next_hop
+
+
+def distributed_best_band_widest_path(
+    adj,
+    links,
+    tx,
+    rx,
+    B=None,
+    max_iters=None,
+    eps=1e-12,
+):
+    """
+    Run decentralized widest-path routing on every band and select the best band.
+
+    Parameters
+    ----------
+    adj : torch.Tensor
+        Directed adjacency matrix [n, n].
+
+    links : torch.Tensor
+        Complex CSI tensor [B, n, n].
+
+    tx : int
+        Source node.
+
+    rx : int
+        Destination node.
+
+    B : int or None
+        Number of bands. If None, inferred from links.
+
+    Returns
+    -------
+    best_path : list[int] or None
+        Best selected path.
+
+    best_band : int or None
+        Selected band index.
+
+    best_bottleneck : float
+        Bottleneck value of selected path/band.
+    """
+    if B is None:
+        B = links.shape[0]
+
+    channel_power = links.abs() ** 2
+
+    best_path = None
+    best_band = None
+    best_bottleneck = -float("inf")
+
+    for b in range(B):
+        path_b, bottleneck_b, _ = distributed_widest_path_single_band(
+            adj=adj,
+            channel_power_b=channel_power[b],
+            tx=tx,
+            rx=rx,
+            max_iters=max_iters,
+            eps=eps,
+        )
+
+        if path_b is not None and bottleneck_b > best_bottleneck:
+            best_path = path_b
+            best_band = b
+            best_bottleneck = bottleneck_b
+
+    if best_path is None:
+        return None, None, 0.0
+
+    return best_path, best_band, best_bottleneck
+
+
+def compute_decentralized_best_single_channel_rate(
+    dataset,
+    problem="single",
+    sigma_noise=None,
+    max_iters=None,
+    eps=1e-12,
+):
+    """
+    Decentralized Best Single Channel / widest-path heuristic for all frameworks.
+
+    The algorithm uses local widest-path updates to select paths and bands.
+    The resulting power allocation is then evaluated using the same
+    interference-aware objectives as the other benchmarks.
+
+    Parameters
+    ----------
+    dataset : iterable
+        Dataset yielding samples with:
+            adj_matrix, links_matrix, sigma, tx, rx, B.
+
+    problem : str
+        One of:
+            "single", "multicast", "multi", "converge", "multiunicast".
+
+    sigma_noise : float or None
+        Optional fixed noise value. If None, uses data.sigma.
+
+    max_iters : int or None
+        Number of distributed message-passing rounds.
+        If None, uses n - 1, which is enough for exact widest path in a
+        connected n-node graph under Bellman-Ford-style updates.
+
+    eps : float
+        Numerical tolerance.
+
+    Returns
+    -------
+    rates : np.ndarray
+        Achieved rate per sample.
+
+    p_store : list
+        Allocations used by the heuristic.
+            - single/multicast: [B, n, n]
+            - multi-like: [B, K, n, n]
+
+    aux_store : list[dict]
+        Metadata per sample: selected paths, bands, bottlenecks.
+    """
+    rates = []
+    p_store = []
+    aux_store = []
+
+    for data in dataset:
+        adj = data.adj_matrix
+        links = data.links_matrix
+        B = data.B if hasattr(data, "B") else links.shape[0]
+        n = adj.shape[0]
+        device = links.device
+
+        sigma = data.sigma if sigma_noise is None else sigma_noise
+
+        tx_list, rx_list = _normalize_tx_rx_for_problem(
+            data.tx,
+            data.rx,
+            problem,
+        )
+
+        K = len(tx_list)
+
+        selected_paths = []
+        selected_bands = []
+        selected_bottlenecks = []
+
+        for tx_k, rx_k in zip(tx_list, rx_list):
+            path_k, band_k, bottleneck_k = distributed_best_band_widest_path(
+                adj=adj,
+                links=links,
+                tx=tx_k,
+                rx=rx_k,
+                B=B,
+                max_iters=max_iters,
+                eps=eps,
+            )
+
+            selected_paths.append(path_k)
+            selected_bands.append(band_k)
+            selected_bottlenecks.append(bottleneck_k)
+
+        # ------------------------------------------------------------
+        # SINGLE
+        # ------------------------------------------------------------
+        if problem == "single":
+            p = torch.zeros_like(links)
+
+            if selected_paths[0] is None:
+                rates.append(0.0)
+                p_store.append(p)
+                aux_store.append(
+                    {
+                        "paths": selected_paths,
+                        "bands": selected_bands,
+                        "bottlenecks": selected_bottlenecks,
+                    }
+                )
+                continue
+
+            b = selected_bands[0]
+            path = selected_paths[0]
+
+            for u, v in zip(path[:-1], path[1:]):
+                p[b, u, v] = 1.0
+
+            paths_tensor = paths_to_tensor([path], device)
+
+            rate = calc_sum_rate(
+                h_arr=links,
+                p_arr=p,
+                sigma=sigma,
+                paths_tensor=paths_tensor,
+                B=B,
+                tau=0.0,
+                per_band=False,
+                ignore_zero_edges=True,
+                power_threshold=1e-8,
+            )
+
+            rates.append(float(rate.item()))
+            p_store.append(p.detach())
+            aux_store.append(
+                {
+                    "paths": selected_paths,
+                    "bands": selected_bands,
+                    "bottlenecks": selected_bottlenecks,
+                }
+            )
+            continue
+
+        # ------------------------------------------------------------
+        # MULTICAST
+        # ------------------------------------------------------------
+        if problem == "multicast":
+            p = torch.zeros_like(links)
+
+            valid_paths = [path for path in selected_paths if path is not None]
+
+            if len(valid_paths) == 0:
+                rates.append(0.0)
+                p_store.append(p)
+                aux_store.append(
+                    {
+                        "paths": selected_paths,
+                        "bands": selected_bands,
+                        "bottlenecks": selected_bottlenecks,
+                    }
+                )
+                continue
+
+            # For multicast, each receiver may select a different best band.
+            # We build one union subgraph per band.
+            subgraphs_per_band = []
+            for b in range(B):
+                paths_b = [
+                    path for path, band in zip(selected_paths, selected_bands)
+                    if path is not None and band == b
+                ]
+
+                if len(paths_b) == 0:
+                    subgraphs_per_band.append([])
+                    continue
+
+                S_b = _paths_to_multicast_subgraph(paths_b, n, device)
+                subgraphs_per_band.append([S_b])
+
+                for path in paths_b:
+                    for u, v in zip(path[:-1], path[1:]):
+                        p[b, u, v] = 1.0
+
+            rate = objective_multicast(
+                h=links,
+                p=p,
+                sigma=sigma,
+                adj=adj,
+                subgraphs_per_band=subgraphs_per_band,
+                tau_min=0.0,
+                tau_max=0.0,
+                per_band=False,
+                eps=1e-12,
+                ignore_zero_edges=True,
+                power_threshold=1e-8,
+            )
+
+            rates.append(float(rate.item()))
+            p_store.append(p.detach())
+            aux_store.append(
+                {
+                    "paths": selected_paths,
+                    "bands": selected_bands,
+                    "bottlenecks": selected_bottlenecks,
+                    "subgraphs_per_band": subgraphs_per_band,
+                }
+            )
+            continue
+
+        # ------------------------------------------------------------
+        # MULTI / CONVERGE / MULTIUNICAST
+        # ------------------------------------------------------------
+        if problem in {"multi", "converge", "multiunicast"}:
+            p = torch.zeros(B, K, n, n, device=device)
+            z = torch.zeros(B, K, n, n, device=device)
+
+            paths_k = []
+            has_any_path = False
+
+            for k, path in enumerate(selected_paths):
+                if path is None:
+                    paths_k.append(torch.empty((0, 0), device=device, dtype=torch.long))
+                    continue
+
+                has_any_path = True
+                b = selected_bands[k]
+
+                for u, v in zip(path[:-1], path[1:]):
+                    p[b, k, u, v] = 1.0 / max(K ** 0.5, 1)
+                    z[b, k, u, v] = 1.0
+
+                paths_k.append(paths_to_tensor([path], device))
+
+            if not has_any_path:
+                rates.append(0.0)
+                p_store.append(p)
+                aux_store.append(
+                    {
+                        "paths": selected_paths,
+                        "bands": selected_bands,
+                        "bottlenecks": selected_bottlenecks,
+                    }
+                )
+                continue
+
+            rate = objective_multicommodity(
+                h=links,
+                p=p,
+                z=z,
+                sigma=sigma,
+                adj=adj,
+                paths_k=paths_k,
+                tau_min=0.0,
+                tau_max=0.0,
+                reduce="mean",
+                per_band=False,
+                outage_as_neg_inf=False,
+                ignore_zero_edges=True,
+                power_threshold=1e-8,
+            )
+
+            rates.append(float(rate.item()))
+            p_store.append(p.detach())
+            aux_store.append(
+                {
+                    "paths": selected_paths,
+                    "bands": selected_bands,
+                    "bottlenecks": selected_bottlenecks,
+                    "Z": z.detach(),
+                }
+            )
+            continue
+
+        raise ValueError(f"Unknown problem={problem}")
+
+    return np.array(rates, dtype=float), p_store, aux_store
+
+# ============================== Decentralized Equal Power =============================================================
 
 def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
     """
@@ -812,7 +1323,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
         B = data.B if hasattr(data, "B") else h.shape[0]
         n = adj.shape[0]
 
-        if sigma_noise is False:
+        if not sigma_noise:
             sigma = data.sigma
         else:
             sigma = sigma_noise
@@ -975,7 +1486,9 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
     return np.array(rate_bounds), p_store
 
 
-def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
+# ======================================= Centralized Greedy Power Allocation ==========================================
+
+def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
     """
     Greedy-power benchmark:
 
@@ -1035,7 +1548,7 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
             shortest_paths = [p for p, L in zip(all_paths, lengths) if L == min_len]
             chosen_path = random.choice(shortest_paths)
 
-            P = _build_P_from_path_single(h, adj, chosen_path)   # [B,n,n]
+            P = _build_P_from_path_single(h, chosen_path)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
 
             paths_tensor = paths_to_tensor(all_paths, device)
@@ -1147,7 +1660,7 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
 
             # Build P from shortest paths per message
             # Assumes helper accepts one list of paths per message, regardless of problem semantics
-            P = _build_P_from_paths_multi(h, adj, paths_k_lists, K)  # [B,K,n,n]
+            P = _build_P_from_paths_multi(h, paths_k_lists, K)  # [B,K,n,n]
 
             # normalize per message
             for k in range(K):
@@ -1182,7 +1695,313 @@ def compute_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
 
     return np.array(rate_bounds), p_store
 
-def _build_P_from_path_single(h, adj, path_nodes):
+# ======================================= Decentralized Greedy Power Allocation ========================================
+
+def compute_decentralized_greedy_power_rate(
+    dataset,
+    sigma_noise=False,
+    problem="single",
+    max_iters=None,
+):
+    """
+    Distributed greedy/shortest-path benchmark.
+
+    This is the decentralized counterpart of compute_greedy_power_rate:
+    it replaces global path enumeration with distributed Bellman-Ford
+    shortest-path routing, then evaluates with the same objective functions.
+
+    Parameters
+    ----------
+    dataset : iterable
+        Dataset of graph samples.
+
+    sigma_noise : float or False
+        If False, use data.sigma. Otherwise use the provided value.
+
+    problem : str
+        "single", "multicast", "multi", "converge", or "multiunicast".
+
+    max_iters : int or None
+        Number of distributed Bellman-Ford update rounds.
+        If None, uses n-1.
+
+    Returns
+    -------
+    rate_bounds : np.ndarray
+        Achieved rate per sample.
+
+    p_store : list
+        Stored allocations. For multi-message cases, stores (P, Z).
+    """
+    rate_bounds = []
+    p_store = []
+
+    for data in dataset:
+        device = data.links_matrix.device
+        data = data.to(device)
+
+        adj = data.adj_matrix
+        h = data.links_matrix
+        B = data.B if hasattr(data, "B") else h.shape[0]
+        n = adj.shape[0]
+
+        sigma = data.sigma if (sigma_noise is False) else sigma_noise
+        sigma_t = (
+            torch.tensor(sigma, device=device)
+            if not isinstance(sigma, torch.Tensor)
+            else sigma.to(device)
+        )
+
+        # --------------------------
+        # SINGLE
+        # tx: int, rx: int
+        # --------------------------
+        if problem == "single":
+            tx = int(data.tx)
+            rx = int(data.rx)
+
+            chosen_path = distributed_shortest_path(
+                adj=adj,
+                tx=tx,
+                rx=rx,
+                max_iters=max_iters,
+            )
+
+            if chosen_path is None:
+                rate_bounds.append(0.0)
+                p_store.append(torch.zeros_like(h))
+                continue
+
+            P = _build_P_from_path_single(h, chosen_path)
+            P = normalize_power(P, adj).to(device)
+
+            paths_tensor = paths_to_tensor([chosen_path], device)
+
+            rate = calc_sum_rate(
+                h_arr=h,
+                p_arr=P,
+                sigma=sigma_t,
+                paths_tensor=paths_tensor,
+                B=B,
+                tau=0.0,
+                eps=1e-12,
+                per_band=False,
+            )
+
+            rate_bounds.append(rate.item())
+            p_store.append(P.detach())
+            continue
+
+        # --------------------------
+        # MULTICAST
+        # tx: int, rx: list[int]
+        # --------------------------
+        if problem == "multicast":
+            tx = int(data.tx)
+
+            rx_list = data.rx
+            if isinstance(rx_list, torch.Tensor):
+                rx_list = rx_list.view(-1).tolist()
+            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
+                rx_list = rx_list[0]
+            rx_list = [int(r) for r in rx_list]
+
+            paths = [
+                distributed_shortest_path(adj, tx, r, max_iters=max_iters)
+                for r in rx_list
+            ]
+
+            if any(path is None for path in paths):
+                rate_bounds.append(0.0)
+                p_store.append(torch.zeros_like(h))
+                continue
+
+            S = _paths_to_multicast_subgraph(paths, n, device)
+
+            subgraphs_per_band = [[S] for _ in range(B)]
+
+            P = torch.zeros(B, n, n, device=device)
+            amp = 1.0 / (B ** 0.5)
+
+            for path in paths:
+                for u, v in zip(path[:-1], path[1:]):
+                    P[:, int(u), int(v)] = amp
+
+            P = normalize_power(P, adj).to(device)
+
+            rate = objective_multicast(
+                h=h,
+                p=P,
+                sigma=sigma_t,
+                adj=adj,
+                subgraphs_per_band=subgraphs_per_band,
+                tau_min=0.0,
+                tau_max=0.0,
+                per_band=False,
+                eps=1e-12,
+            )
+
+            rate_bounds.append(rate.item())
+            p_store.append(P.detach())
+            continue
+
+        # --------------------------
+        # MULTI
+        # tx: int, rx: list[int]
+        # --------------------------
+        if problem == "multi":
+            tx = int(data.tx)
+
+            rx_list = data.rx
+            if isinstance(rx_list, torch.Tensor):
+                rx_list = rx_list.view(-1).tolist()
+            rx_list = [int(r) for r in rx_list]
+
+            paths_k = [
+                distributed_shortest_path(adj, tx, r, max_iters=max_iters)
+                for r in rx_list
+            ]
+            K = len(rx_list)
+
+        # --------------------------
+        # CONVERGE
+        # tx: list[int], rx: int
+        # --------------------------
+        elif problem == "converge":
+            tx_list = data.tx
+            if isinstance(tx_list, torch.Tensor):
+                tx_list = tx_list.view(-1).tolist()
+            tx_list = [int(t) for t in tx_list]
+
+            rx = int(data.rx)
+
+            paths_k = [
+                distributed_shortest_path(adj, t, rx, max_iters=max_iters)
+                for t in tx_list
+            ]
+            K = len(tx_list)
+
+        # --------------------------
+        # MULTIUNICAST
+        # tx: list[int], rx: list[int]
+        # --------------------------
+        elif problem == "multiunicast":
+            tx_list = data.tx
+            rx_list = data.rx
+
+            if isinstance(tx_list, torch.Tensor):
+                tx_list = tx_list.view(-1).tolist()
+            if isinstance(rx_list, torch.Tensor):
+                rx_list = rx_list.view(-1).tolist()
+
+            tx_list = [int(t) for t in tx_list]
+            rx_list = [int(r) for r in rx_list]
+
+            if len(tx_list) != len(rx_list):
+                raise ValueError("For multiunicast, tx and rx must have the same length.")
+
+            paths_k = [
+                distributed_shortest_path(adj, t, r, max_iters=max_iters)
+                for t, r in zip(tx_list, rx_list)
+            ]
+            K = len(tx_list)
+
+        else:
+            raise ValueError(f"Unknown problem='{problem}'")
+
+        # --------------------------
+        # MULTI-MESSAGE EVALUATION
+        # --------------------------
+        if problem in {"multi", "converge", "multiunicast"}:
+            if not any(path is not None for path in paths_k):
+                rate_bounds.append(0.0)
+                p_store.append(torch.zeros(B, len(paths_k), n, n, device=device))
+                continue
+
+            P = _build_P_from_paths_multi(h, paths_k, K)
+
+            for k in range(len(paths_k)):
+                P[:, k] = normalize_power(P[:, k], adj).to(device)
+
+            paths_k_tensors = [
+                paths_to_tensor([path], device)
+                if path is not None else torch.empty((0, 0), device=device, dtype=torch.long)
+                for path in paths_k
+            ]
+
+            Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, len(paths_k), n, n).to(device)
+
+            rate = objective_multicommodity(
+                h=h,
+                p=P,
+                z=Z,
+                sigma=sigma_t,
+                adj=adj,
+                paths_k=paths_k_tensors,
+                tau_min=0.0,
+                tau_max=0.0,
+                reduce="mean",
+                per_band=False,
+                outage_as_neg_inf=False,
+            )
+
+            rate_bounds.append(rate.item())
+            p_store.append((P.detach(), Z.detach()))
+
+    return np.array(rate_bounds), p_store
+
+# ======================================== Aux Functions ===============================================================
+
+def _normalize_tx_rx_for_problem(tx, rx, problem) -> tuple[list[int], list[int]]:
+    """
+    Convert tx/rx fields into aligned commodity pairs.
+
+    Returns
+    -------
+    tx_list : list[int]
+    rx_list : list[int]
+    """
+    if isinstance(tx, torch.Tensor):
+        tx = tx.view(-1).tolist() if tx.numel() > 1 else int(tx.item())
+    if isinstance(rx, torch.Tensor):
+        rx = rx.view(-1).tolist() if rx.numel() > 1 else int(rx.item())
+
+    if problem == "single":
+        return [int(tx)], [int(rx)]
+
+    if problem == "multicast":
+        rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+        return [int(tx)] * len(rx_list), [int(r) for r in rx_list]
+
+    if problem == "multi":
+        rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+        return [int(tx)] * len(rx_list), [int(r) for r in rx_list]
+
+    if problem == "converge":
+        tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+
+        if isinstance(rx, (list, tuple)):
+            if len(rx) != 1:
+                raise ValueError("For converge, rx must contain exactly one receiver.")
+            rx_scalar = int(rx[0])
+        else:
+            rx_scalar = int(rx)
+
+        return [int(t) for t in tx_list], [rx_scalar] * len(tx_list)
+
+    if problem == "multiunicast":
+        tx_list = list(tx) if isinstance(tx, (list, tuple)) else [tx]
+        rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
+
+        if len(tx_list) != len(rx_list):
+            raise ValueError("For multiunicast, len(tx) must equal len(rx).")
+
+        return [int(t) for t in tx_list], [int(r) for r in rx_list]
+
+    raise ValueError(f"Unknown problem={problem}")
+
+
+def _build_P_from_path_single(h, path_nodes):
     """
     For SINGLE / MULTICAST (per-path) case:
     Given a node-sequence path [v0, v1, ..., vL], construct P of shape [B,n,n] such that:
@@ -1202,7 +2021,7 @@ def _build_P_from_path_single(h, adj, path_nodes):
     return P
 
 
-def _build_P_from_paths_multi(h, adj, paths_k, K):
+def _build_P_from_paths_multi(h, paths_k, K):
     """
     MULTI-COMMODITY case:
     paths_k is a list length K, each element either:
@@ -1220,20 +2039,22 @@ def _build_P_from_paths_multi(h, adj, paths_k, K):
     amp = 1.0 / (B ** 0.5)
 
     for k, pk_raw in enumerate(paths_k):
-        # pk_raw was created earlier via find_all_paths; here we re-use those lists.
         if pk_raw is None or len(pk_raw) == 0:
             continue
 
-        # pk_raw is a list of node lists, e.g., [[tx,...,rx], ...]
-        path_lengths = [len(p) - 1 for p in pk_raw]  # number of edges
-        min_len = min(path_lengths)
-        candidates = [p for p, L in zip(pk_raw, path_lengths) if L == min_len]
+        # Case 1: pk_raw is already one selected path, e.g. [tx, ..., rx]
+        if isinstance(pk_raw[0], int):
+            chosen_path = pk_raw
 
-        chosen_path = random.choice(candidates)
+        # Case 2: pk_raw is a list of candidate paths, e.g. [[tx,...,rx], ...]
+        else:
+            path_lengths = [len(p) - 1 for p in pk_raw]
+            min_len = min(path_lengths)
+            candidates = [p for p, L in zip(pk_raw, path_lengths) if L == min_len]
+            chosen_path = random.choice(candidates)
 
-        # Set P[:,k,u,v] = 1/sqrt(B) for each hop
         for u, v in zip(chosen_path[:-1], chosen_path[1:]):
-            P[:, k, u, v] = amp
+            P[:, k, int(u), int(v)] = amp
 
     return P
 
@@ -1291,9 +2112,94 @@ def _build_P_from_multicast_subgraph(h, adj, subgraph):
 
     return P
 
+def _paths_to_multicast_subgraph(paths, n, device):
+    """
+    Convert several receiver paths into one multicast subgraph adjacency mask.
 
+    Parameters
+    ----------
+    paths : list[list[int]]
+        One selected path per receiver.
 
+    n : int
+        Number of nodes.
 
+    device : torch.device
+        Target device.
 
+    Returns
+    -------
+    torch.Tensor
+        Binary subgraph adjacency matrix [n, n].
+    """
+    S = torch.zeros(n, n, device=device)
+
+    for path in paths:
+        if path is None:
+            continue
+
+        for u, v in zip(path[:-1], path[1:]):
+            S[int(u), int(v)] = 1.0
+
+    return S
+
+def distributed_shortest_path(adj, tx, rx, max_iters=None):
+    """
+    Distributed Bellman-Ford shortest path.
+
+    Returns
+    -------
+    path : list[int] or None
+        Minimum-hop path from tx to rx.
+    """
+    device = adj.device
+    n = adj.shape[0]
+    tx, rx = int(tx), int(rx)
+
+    if max_iters is None:
+        max_iters = n - 1
+
+    dist = torch.full((n,), float("inf"), device=device)
+    dist[rx] = 0.0
+    next_hop = -torch.ones(n, dtype=torch.long, device=device)
+
+    for _ in range(max_iters):
+        dist_old = dist.clone()
+
+        for i in range(n):
+            if i == rx:
+                continue
+
+            neigh = torch.where(adj[i] > 0)[0]
+            if neigh.numel() == 0:
+                continue
+
+            vals = 1.0 + dist_old[neigh]
+            best_val, best_idx = vals.min(dim=0)
+
+            if best_val < dist[i]:
+                dist[i] = best_val
+                next_hop[i] = neigh[best_idx]
+
+        if torch.equal(dist, dist_old):
+            break
+
+    if not torch.isfinite(dist[tx]):
+        return None
+
+    path = [tx]
+    cur = tx
+    visited = {cur}
+
+    while cur != rx:
+        nh = int(next_hop[cur].item())
+        if nh < 0 or nh in visited:
+            return None
+
+        path.append(nh)
+        visited.add(nh)
+        cur = nh
+
+    return path
 
 

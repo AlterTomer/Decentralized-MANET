@@ -1,6 +1,12 @@
 import numpy as np
 import torch
-from utils.CentralizedUtils import evaluate_centralized_adam, compute_strongest_bottleneck_rate, compute_equal_power_bound, compute_greedy_power_rate
+from utils.CentralizedUtils import (evaluate_centralized_adam,
+                                    compute_centralized_best_single_channel_rate,
+                                    compute_decentralized_best_single_channel_rate,
+                                    compute_equal_power_bound,
+                                    compute_centralized_greedy_power_rate,
+                                    compute_decentralized_greedy_power_rate,
+                                    evaluate_ffn)
 from utils.PathUtils import find_all_paths, paths_to_tensor
 from utils.MetricUtils import calc_sum_rate
 from utils.DataUtils import mean_var_over_dataset
@@ -10,192 +16,12 @@ from Multicast.SubGraphs import find_multicast_subgraphs
 # -------------------------------
 # Helpers
 # -------------------------------
-# def evaluate_across_snr(
-#     dataset,
-#     model,
-#     B,
-#     snr_db_list,
-#     *,
-#     problem: str = "single",      # "single" | "multicast" | "multi"
-#     multi_mode: str = "global",   # only used for problem=="multi" in bottleneck
-# ):
-#     """
-#     Sequential evaluation across a list of SNR values.
-#
-#     Args:
-#         dataset: iterable of graph data objects.
-#         model:   trained GNN model.
-#         B: number of bands.
-#         snr_db_list: list of SNR values in dB.
-#         problem: "single", "multicast", or "multi".
-#         multi_mode: for problem=="multi" in strongest-bottleneck:
-#             - "global": single best (b,k) over all commodities.
-#             - "per_commodity": unique band per commodity (if you use that mode).
-#
-#     Returns:
-#         dict: {
-#             "gnn": {snr_db: mean_rate},
-#             "centralized": {snr_db: mean_rate},
-#             "strongest bottleneck": {snr_db: mean_rate},
-#             "equal power": {snr_db: mean_rate},
-#             "greedy maxlink": {snr_db: mean_rate}
-#         }
-#     """
-#     device = next(model.parameters()).device
-#     results = {
-#         "gnn": {},
-#         "centralized": {},
-#         "strongest bottleneck": {},
-#         "equal power": {},
-#         "greedy maxlink": {}
-#     }
-#
-#     # --- compute mean channel variance for noise scaling ---
-#     mean_channel_var = mean_var_over_dataset(dataset)
-#
-#     for snr_db in snr_db_list:
-#         snr = 10.0 ** (snr_db / 10.0)
-#         sigma2 = mean_channel_var / snr
-#         sigma = sigma2 ** 0.5
-#         print(f"SNR: {snr_db} dB")
-#
-#         # =================================================
-#         # 1) GNN mean rate
-#         # =================================================
-#         model.eval()
-#         with torch.no_grad():
-#             rates = []
-#             for d in dataset:
-#                 # Set noise
-#                 d.sigma = torch.tensor(sigma, device=device)
-#
-#                 adj = d.adj_matrix
-#                 tx = d.tx
-#                 rx = d.rx
-#
-#                 # Problem-specific structures for _compute_rates_per_layer
-#                 paths = None
-#                 subgraphs_per_band = None
-#                 paths_k = None
-#
-#                 if problem == "single":
-#                     # Tx → Rx paths
-#                     raw_paths = find_all_paths(adj.cpu(), tx, rx)
-#                     if not raw_paths:
-#                         # no connectivity → rate 0 for this sample
-#                         rates.append(0.0)
-#                         continue
-#                     paths = paths_to_tensor(raw_paths, device)
-#
-#                 elif problem == "multicast":
-#                     # rx is list of receivers
-#                     if isinstance(rx, (list, tuple)):
-#                         rx_list = list(rx)
-#                     else:
-#                         rx_list = [rx]
-#
-#                     # One multicast subgraph set, replicated across bands
-#                     subgraphs = find_multicast_subgraphs(d.adj_matrix, d.tx, d.rx)
-#                     if (subgraphs is None) or (len(subgraphs) == 0):
-#                         rates.append(0.0)
-#                         continue
-#                     subgraphs_per_band = [subgraphs for _ in range(B)]
-#
-#                 elif problem == "multi":
-#                     # multicommodity: Tx→rx_k for each k
-#                     if isinstance(rx, (list, tuple)):
-#                         rx_list = list(rx)
-#                     else:
-#                         rx_list = [rx]
-#                     K = len(rx_list)
-#
-#                     paths_k = []
-#                     has_any_path = False
-#                     for rx_k in rx_list:
-#                         raw_paths_k = find_all_paths(adj.cpu(), tx, rx_k)
-#                         if raw_paths_k:
-#                             has_any_path = True
-#                         paths_k.append(paths_to_tensor(raw_paths_k, device) if raw_paths_k else
-#                                        torch.empty((0, 0), dtype=torch.long, device=device))
-#                     if not has_any_path:
-#                         rates.append(0.0)
-#                         continue
-#
-#                 else:
-#                     raise ValueError(f"Unknown problem type: {problem}")
-#
-#                 # Tag problem (if model cares about it)
-#                 setattr(d, "problem", problem)
-#                 d = d.to(device)
-#
-#                 # Call the new helper
-#                 rates_per_layer, _, _ = _compute_rates_per_layer(
-#                     model,
-#                     d,
-#                     paths=paths,
-#                     subgraphs_per_band=subgraphs_per_band,
-#                     paths_k=paths_k,
-#                     problem=problem,
-#                     tau_min=0.0,
-#                     tau_max=0.0,
-#                 )
-#
-#                 # Take best layer (as before)
-#                 layer_rates = torch.stack(rates_per_layer)  # [L]
-#                 rate = layer_rates.max().item()
-#                 rates.append(rate)
-#
-#             results["gnn"][snr_db] = float(np.mean(rates))
-#
-#         # ==============================================
-#         # 2) Centralized ADAM benchmark (problem-aware)
-#         # ==============================================
-#         adam_rates, _ = evaluate_centralized_adam(
-#             dataset,
-#             B,
-#             noise_std=sigma,
-#             num_iterations=50,
-#             problem=problem,
-#         )
-#         results["centralized"][snr_db] = float(np.mean(adam_rates))
-#
-#         # ==============================================
-#         # 3) Strongest bottleneck lower bound
-#         # ==============================================
-#         bottleneck_rates, _ = compute_strongest_bottleneck_rate(
-#             dataset,
-#             problem=problem,
-#             sigma_noise=sigma,
-#             multi_mode=multi_mode if problem == "multi" else "global",
-#         )
-#         # For multi+per_commodity you may want a different aggregation;
-#         # here we assume scalar-per-graph (global) or we just mean over all entries.
-#         results["strongest bottleneck"][snr_db] = float(np.mean(bottleneck_rates))
-#
-#         # ==============================================
-#         # 4) Equal-power heuristic (make it problem-aware too)
-#         # ==============================================
-#         rates_equal_power, _ = compute_equal_power_bound(
-#             dataset,
-#             sigma_noise=sigma,
-#             problem=problem,
-#         )
-#         results["equal power"][snr_db] = float(np.mean(rates_equal_power))
-#
-#         # ==============================================
-#         # 5) Greedy max-link benchmark
-#         # ==============================================
-#         rates_greedy, _ = compute_greedy_power_rate(
-#             dataset,
-#             sigma_noise=sigma,
-#             problem=problem,
-#         )
-#         results["greedy maxlink"][snr_db] = float(np.mean(rates_greedy))
-#
-#     return results
+
 def evaluate_across_snr(
     dataset,
     model,
+    ffn_dataset,
+    ffn_model,
     B,
     snr_db_list,
     *,
@@ -208,6 +34,8 @@ def evaluate_across_snr(
     Args:
         dataset: iterable of graph data objects.
         model:   trained GNN model.
+        ffn_dataset: iterable of MANET data objects for FFN.
+        ffn_model: trained FFN model.
         B: number of bands.
         snr_db_list: list of SNR values in dB.
         problem: one of
@@ -232,10 +60,13 @@ def evaluate_across_snr(
     device = next(model.parameters()).device
     results = {
         "gnn": {},
+        "ffn": {},
         "centralized": {},
         "strongest bottleneck": {},
+        "strongest bottleneck decentralized": {},
         "equal power": {},
-        "greedy maxlink": {}
+        "greedy maxlink": {},
+        "greedy maxlink decentralized": {}
     }
 
     # --- compute mean channel variance for noise scaling ---
@@ -384,31 +215,46 @@ def evaluate_across_snr(
 
             results["gnn"][snr_db] = float(np.mean(rates))
 
+        # =================================================
+        # 2) FFN mean rate
+        # =================================================
+        ffn_model.eval()
+        ffn_loader = torch.utils.data.DataLoader(ffn_dataset, batch_size=1, shuffle=False)
+        with torch.no_grad():
+            ffn_rates, _ = evaluate_ffn(ffn_model, ffn_loader, problem)
+        results["ffn"][snr_db] = float(np.mean(ffn_rates))
+
         # ==============================================
-        # 2) Centralized ADAM benchmark
+        # 3) Centralized ADAM benchmark
         # ==============================================
         adam_rates, _ = evaluate_centralized_adam(
             dataset,
             B,
             noise_std=sigma,
-            num_iterations=50,
+            num_iterations=1000,
             problem=problem,
         )
         results["centralized"][snr_db] = float(np.mean(adam_rates))
 
         # ==============================================
-        # 3) Strongest bottleneck lower bound
+        # 4) Strongest bottleneck lower bound
         # ==============================================
-        bottleneck_rates, _ = compute_strongest_bottleneck_rate(
+        bottleneck_rates, _ = compute_centralized_best_single_channel_rate(
             dataset,
             problem=problem,
             sigma_noise=sigma,
-            multi_mode=multi_mode if problem in {"multi", "converge", "multiunicast"} else "global",
         )
         results["strongest bottleneck"][snr_db] = float(np.mean(bottleneck_rates))
 
+        bottleneck_rates_decentralized, _, _ = compute_decentralized_best_single_channel_rate(
+            dataset,
+            problem=problem,
+            sigma_noise=sigma,
+        )
+        results["strongest bottleneck decentralized"][snr_db] = float(np.mean(bottleneck_rates_decentralized))
+
         # ==============================================
-        # 4) Equal-power heuristic
+        # 5) Equal-power heuristic
         # ==============================================
         rates_equal_power, _ = compute_equal_power_bound(
             dataset,
@@ -418,14 +264,21 @@ def evaluate_across_snr(
         results["equal power"][snr_db] = float(np.mean(rates_equal_power))
 
         # ==============================================
-        # 5) Greedy max-link benchmark
+        # 6) Greedy max-link benchmark
         # ==============================================
-        rates_greedy, _ = compute_greedy_power_rate(
+        rates_greedy, _ = compute_centralized_greedy_power_rate(
             dataset,
             sigma_noise=sigma,
             problem=problem,
         )
         results["greedy maxlink"][snr_db] = float(np.mean(rates_greedy))
+
+        rates_greedy_decentralized, _ = compute_decentralized_greedy_power_rate(
+            dataset,
+            sigma_noise=sigma,
+            problem=problem,
+        )
+        results["greedy maxlink decentralized"][snr_db] = float(np.mean(rates_greedy_decentralized))
 
     return results
 

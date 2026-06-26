@@ -14,12 +14,25 @@ def objective_multicast(
     power_threshold: float = 1e-8,
 ) -> torch.Tensor:
     """
-    Implements the multicast (multiple receivers, one shared message) objective.
+    Implements the interference-aware multicast objective.
 
-        J(P) = mean_b  max_{S in S_b}  min_{(i->j) in S} R^{(b)}_{i->j}(P)
+        J(P) = mean_b max_{S in S_b} min_{(i->j) in S} R^{(b)}_{i->j}(P)
 
     where
-        R^{(b)}_{i->j}(P) = log2(1 + |h^{(b)}_{i->j}|^2 * p^{(b)2}_{i->j} / sigma_b^2).
+
+        R^{(b)}_{i->j}(P) = log2(1 + SINR^{(b)}_{i->j})
+
+    and
+
+        SINR^{(b)}_{i->j} =
+            |h^{(b)}_{i,j}|^2 p^{(b)2}_{i,j}
+            /
+            (sigma_b^2
+             + sum_{k in N(j), k != i} |h^{(b)}_{k,j}|^2
+               sum_l p^{(b)2}_{k,l})
+
+    Interference is computed separately per frequency band.
+    There is no cross-band interference.
 
     subgraphs_per_band: list of length B; each element is a list of subgraphs,
         and each subgraph S is an [n, n] {0,1} mask; nonzero entries indicate
@@ -27,11 +40,10 @@ def objective_multicast(
 
     ignore_zero_edges:
         If True, when computing the min over edges in S, only consider edges
-        with p^{(b)}_{i->j} > power_threshold. Subgraphs that contain no such
+        with p^{(b)}_{i,j} > power_threshold. Subgraphs that contain no such
         edges are ignored. If an entire band has no subgraph with any active
         edge, that band contributes 0 to the mean.
     """
-    # Shapes / device
     B, n, _ = h.shape
     device = h.device
 
@@ -40,18 +52,51 @@ def objective_multicast(
     if sigma.numel() == 1:
         sigma = sigma.repeat(B)
     sigma = sigma.clamp_min(eps)
-    sigma2 = (sigma**2).view(B, 1, 1)  # [B,1,1]
+    sigma2 = (sigma ** 2).view(B, 1, 1)  # [B,1,1]
 
     # Sanitize inputs and mask non-edges
-    adj_mask = (adj != 0).to(p.dtype).to(device)           # [n,n]
-    p = torch.nan_to_num(torch.real(p), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-    h_abs2 = (torch.nan_to_num(h, nan=0.0).abs() ** 2) * adj_mask  # [B,n,n]
-    p2 = (p ** 2) * adj_mask
+    adj_mask = (adj != 0).to(dtype=torch.float32, device=device)  # [n,n]
 
-    # Per-edge rates (no interference)
-    snr = h_abs2 * p2 / sigma2  # [B,n,n]
-    snr = torch.nan_to_num(snr, nan=0.0, posinf=0.0, neginf=0.0)
-    R = torch.log2(1.0 + snr) * adj_mask  # [B,n,n]
+    p = torch.nan_to_num(
+        torch.real(p),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp_min(0.0)
+
+    h = torch.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0)
+
+    h_abs2 = (h.abs() ** 2) * adj_mask  # [B,n,n]
+    p2 = (p ** 2) * adj_mask            # [B,n,n]
+
+    # Desired received power on each directed link i -> j
+    desired_power = h_abs2 * p2  # [B,n,n]
+
+    # Same-band total transmit power of each node k:
+    # sum_l p^{(b)2}_{k,l}
+    tx_power_per_node = p2.sum(dim=2)  # [B,n]
+
+    # Neighbor-only interference:
+    # transmitter k contributes interference at receiver j only if k -> j is a valid link.
+    neighbor_mask = adj_mask.unsqueeze(0)  # [1,n,n]
+
+    # Total same-band received power at each receiver j from neighboring transmitters k
+    rx_total_power = torch.einsum(
+        "bkj,bk->bj",
+        h_abs2 * neighbor_mask,
+        tx_power_per_node,
+    )  # [B,n]
+
+    # Interference for desired link i -> j:
+    # subtract the desired i -> j contribution from total received same-band power at j.
+    interference = rx_total_power[:, None, :] - desired_power  # [B,n,n]
+    interference = interference.clamp_min(0.0)
+
+    # Per-edge SINR and rate
+    sinr = desired_power / (sigma2 + interference + eps)
+    sinr = torch.nan_to_num(sinr, nan=0.0, posinf=0.0, neginf=0.0)
+
+    R = torch.log2(1.0 + sinr) * adj_mask  # [B,n,n]
     R = R.real
 
     # Aggregate: max over subgraphs of min-over-edges
@@ -60,54 +105,65 @@ def objective_multicast(
     for b in range(B):
         subgraphs = subgraphs_per_band[b]
         if not subgraphs:
-            # No multicast structures at all in this band -> contributes 0
             r_band[b] = 0.0
             continue
 
         sub_vals = []
 
         for S in subgraphs:
-            if (S is None) or (isinstance(S, torch.Tensor) and not torch.any(S)):
+            if S is None:
                 continue
 
-            edge_idx = S.nonzero(as_tuple=False)  # [E, 2]
+            if not isinstance(S, torch.Tensor):
+                S = torch.as_tensor(S, device=device)
+            else:
+                S = S.to(device)
+
+            if not torch.any(S):
+                continue
+
+            edge_idx = S.nonzero(as_tuple=False)  # [E,2]
             if edge_idx.numel() == 0:
                 continue
 
             ii = edge_idx[:, 0]
             jj = edge_idx[:, 1]
 
-            edge_rates = R[b, ii, jj]  # [|S|]
+            edge_rates = R[b, ii, jj]
 
             if ignore_zero_edges:
-                # Only keep edges that actually carry power on this band
                 edge_p = p[b, ii, jj]
                 active_mask = edge_p > power_threshold
+
                 if not torch.any(active_mask):
-                    # This subgraph has no active edges under p -> skip it
                     continue
+
                 edge_rates = edge_rates[active_mask]
 
-            # Now edge_rates contains the rates of the edges we consider
             if edge_rates.numel() == 0:
                 continue
 
             if tau_min > 0.0:
-                sub_val = (-1.0 / tau_min) * torch.logsumexp(-tau_min * edge_rates, dim=0)
+                sub_val = (-1.0 / tau_min) * torch.logsumexp(
+                    -tau_min * edge_rates,
+                    dim=0,
+                )
             else:
                 sub_val = edge_rates.min()
+
             sub_vals.append(sub_val)
 
         if len(sub_vals) == 0:
-            # No subgraph in this band had any active edge (or any edges at all)
-            # -> band contributes 0 to the mean.
             r_band[b] = 0.0
             continue
 
-        sub_vals = torch.stack(sub_vals)  # [num_valid_subgraphs]
+        sub_vals = torch.stack(sub_vals)
 
         if tau_max > 0.0:
-            r_band[b] = (1.0 / tau_max) * torch.logsumexp(tau_max * sub_vals, dim=0)
+            r_band[b] = (1.0 / tau_max) * torch.logsumexp(
+                tau_max * sub_vals,
+                dim=0,
+            )
         else:
             r_band[b] = sub_vals.max()
 

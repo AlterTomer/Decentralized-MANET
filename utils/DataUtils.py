@@ -117,11 +117,11 @@ def generate_graph_data(n_list, tx_list, rx_list, sigma_list, B, K=1, seed=1000,
         mat = mat73.loadmat(channel_path)
         raw_channels = mat['H_all']
         print(f"Loaded channel matrix from {channel_path} with shape {raw_channels.shape}")
-        if raw_channels.shape[0] != num_samples:
-            raise ValueError(f"Mismatch: {num_samples} graphs expected, but .mat contains {raw_channels.shape[0]} samples.")
+        # num_samples = raw_channels.shape[0]
+        # if raw_channels.shape[0] != num_samples:
+        #     raise ValueError(f"Mismatch: {num_samples} graphs expected, but .mat contains {raw_channels.shape[0]} samples.")
 
-        for i in range(num_samples):
-            n = n_list[i]
+        for i in range(raw_channels.shape[0]):
             links = torch.as_tensor(raw_channels[i], dtype=torch.cfloat, device=device)
             adj = (links.abs().sum(dim=0) > 0).float()
             adj.fill_diagonal_(0)

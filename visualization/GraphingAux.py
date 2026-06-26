@@ -53,16 +53,22 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
     """
     adam = list(results["centralized"].values())
     gnn = list(results["gnn"].values())
+    ffn = list(results["ffn"].values())
     sbn = list(results["strongest bottleneck"].values())
+    sbn_dec = list(results["strongest bottleneck decentralized"].values())
     ep = list(results["equal power"].values())
     gp = list(results["greedy maxlink"].values())
+    gp_dec = list(results["greedy maxlink decentralized"].values())
 
     plt.figure(figsize=(16, 12))
-    plt.plot(snr_db, adam, marker="o", label="Centralized Optimizer", markersize=12)
-    plt.plot(snr_db, gnn,  marker="s", label="MANET-GNN", linestyle="dashed", markersize=12)
-    plt.plot(snr_db, sbn,   marker="^", label="Best Single Channel", linestyle="dotted", markersize=12)
-    plt.plot(snr_db, ep, marker="+", label="Equal-Split", linestyle="dashdot", markersize=12)
-    plt.plot(snr_db, gp, marker="*", label="Greedy-Split", linestyle='-', markersize=12)
+    plt.plot(snr_db, adam, marker="o", label="Centralized Optimizer", linestyle="-", markersize=12)
+    plt.plot(snr_db, gnn,  marker="s", label="MANET-GNN", linestyle="--", markersize=12)
+    plt.plot(snr_db, ffn,  marker="d", label="MANET-FFN", linestyle="-.", markersize=12)
+    plt.plot(snr_db, sbn,   marker="^", label="Centralized Widest Path", linestyle=":", markersize=12)
+    plt.plot(snr_db, sbn_dec, marker="v", label="Decentralized Widest Path", linestyle="-", markersize=12)
+    plt.plot(snr_db, gp, marker="*", label="Centralized Greedy Split", linestyle='-.', markersize=12)
+    plt.plot(snr_db, gp_dec, marker="h", label="Decentralized Greedy Split", linestyle=":", markersize=12)
+    plt.plot(snr_db, ep, marker="+", label="Equal Split", linestyle="--", markersize=12)
 
 
     plt.yscale("log")

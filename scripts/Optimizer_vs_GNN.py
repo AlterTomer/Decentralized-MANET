@@ -1,4 +1,5 @@
 import torch
+from pathlib import Path
 from configparser import ConfigParser
 from models.models import ChainedGNN
 from utils.DataUtils import generate_graph_data
@@ -8,6 +9,8 @@ from utils.ConfigUtils import parse_args, load_ini_config
 from utils.ParseUtils import parse_tx_rx_data
 from visualization.GraphingAux import plot_mean_rate_vs_snr
 import pickle
+from MANET_FFN.MANET_FFN_Dataset import FFNDataset
+from MANET_FFN.model import FFNPowerAllocator
 
 # ====== config ======
 # args = parse_args()
@@ -39,6 +42,7 @@ try:
 except KeyError:
     channel_path = None
 fig_path = files_params["fig path"]
+ffn_path = files_params["ffn path"]
 model_path = files_params["model path"]
 fig_data_path = files_params["fig data path"]
 
@@ -79,6 +83,22 @@ dataset = generate_graph_data(
     channel_path=channel_path,
     device='cpu'
 )
+adj_list = []
+links_list = []
+for d in dataset:
+    adj_list.append(d.adj_matrix)
+    links_list.append(d.links_matrix)
+
+ffn_dataset = FFNDataset(
+    adj_list=adj_list,
+    links_list=links_list,
+    tx_list=tx_list,
+    rx_list=rx_list,
+    sigma_list=sigma_list,
+    B=B,
+    problem=MODE,
+    K=K_cfg,
+)
 
 if est_csi:
     print("Using estimated CSI")
@@ -106,6 +126,7 @@ elif MODE in {"multicast", "multi", "converge", "multiunicast"}:
 else:
     raise ValueError("MODE must be 'multicast', 'multi', 'converge', or 'multiunicast'.")
 
+# MANET-GNN Model
 model = ChainedGNN(
     num_layers=L,
     B=B,
@@ -130,13 +151,31 @@ for k, v in state_dict.items():
 # model.load_state_dict(ckpt["model_state_dict"])
 model.load_state_dict(new_state_dict, strict=False)
 
+# FFN Model
+file_path = Path(ffn_path) / "ffn_run_config.pt"
+ffn_cfg = torch.load(file_path, weights_only=False)
+ffn_model = FFNPowerAllocator(n_nodes=ffn_cfg['n'],
+                              n_bands=ffn_cfg['B'],
+                              K=ffn_cfg['K_cfg'],
+                              problem=MODE,
+                              hidden_dim=ffn_cfg['hidden_dim'],
+                              num_layers=ffn_cfg['num_layers'],
+                              dropout=ffn_cfg['dropout'],
+                              use_layernorm=True)
+ffn_weights = Path(ffn_path) / "ffn_checkpoint.pt"
+ffn_state_dict = torch.load(ffn_weights, weights_only=False)['model_state_dict']
+ffn_model.load_state_dict(ffn_state_dict)
+ffn_model.to(device).eval()
+
 
 g = torch.Generator().manual_seed(SEED)
 
-snr_db_list = list(range(0, 21, 1))
-results = evaluate_across_snr(dataset, model, B, snr_db_list,problem=MODE)
+snr_db_list = list(range(0, 51, 2))
+results = evaluate_across_snr(dataset, model, ffn_dataset, ffn_model, B, snr_db_list,problem=MODE)
 with open(fig_data_path, "wb") as file:
     pickle.dump(results, file)
+
+
 
 plot_mean_rate_vs_snr(snr_db_list, results, save_path=fig_path)
 print(f'Fig saved at: {fig_path}')
