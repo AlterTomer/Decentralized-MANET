@@ -26,7 +26,6 @@ def evaluate_across_snr(
     snr_db_list,
     *,
     problem: str = "single",      # "single" | "multicast" | "multi" | "converge" | "multiunicast"
-    multi_mode: str = "global",   # used for multi-message problems in bottleneck
 ):
     """
     Sequential evaluation across a list of SNR values.
@@ -221,7 +220,7 @@ def evaluate_across_snr(
         ffn_model.eval()
         ffn_loader = torch.utils.data.DataLoader(ffn_dataset, batch_size=1, shuffle=False)
         with torch.no_grad():
-            ffn_rates, _ = evaluate_ffn(ffn_model, ffn_loader, problem)
+            ffn_rates, _ = evaluate_ffn(ffn_model, ffn_loader, sigma_noise=sigma, problem=problem)
         results["ffn"][snr_db] = float(np.mean(ffn_rates))
 
         # ==============================================

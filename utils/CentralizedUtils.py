@@ -435,6 +435,7 @@ def evaluate_centralized_adam(
 def evaluate_ffn(
     model,
     loader,
+    sigma_noise,
     problem="single",
 ):
     """
@@ -447,6 +448,9 @@ def evaluate_ffn(
 
     loader : DataLoader
         Evaluation dataset.
+
+    sigma_noise : float
+        Noise std (σ).
 
     problem : str
         Communication framework.
@@ -482,7 +486,7 @@ def evaluate_ffn(
         rate = objective_fn(
             h=h,
             p=p,
-            sigma=sigma,
+            sigma=sigma_noise,
             adj=adj,
             tx=tx,
             rx=rx,
