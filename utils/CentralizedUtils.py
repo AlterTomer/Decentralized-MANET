@@ -32,7 +32,7 @@ def classic_opt(
         adj_mat (torch.Tensor): [n, n] adjacency matrix.
         links_mat (torch.Tensor): [B, n, n] channel matrices.
         p_arr (torch.nn.Parameter): Power allocation variable (B, n, n).
-        sigma_noise (float): Noise power (σ²) or equivalent.
+        sigma_noise (float): Noise std (σ) or equivalent.
         objective_fn (callable): Function that computes the scalar objective given
                                  (links_mat, p_arr, sigma_noise, **objective_kwargs).
         objective_kwargs (dict): Extra arguments specific to the problem (paths,
@@ -188,14 +188,28 @@ def evaluate_centralized_adam(
             )  # [B, n, n]
 
             objective_fn = objective_single_wrapper
-            objective_kwargs = dict(
+            objective_kwargs_train = dict(
                 paths=paths,
                 B=B,
-                tau_min=0.0,
-                tau_max=0.0,
+                tau_min=10,
+                tau_max=10,
                 per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
                 eps=1e-12,
             )
+
+            objective_kwargs_eval = dict(
+                paths=paths,
+                B=B,
+                tau_min=0,
+                tau_max=0,
+                per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
+                eps=1e-12,
+            )
+
 
         elif problem == "multicast":
             # Single Tx, multiple Rx, same message
@@ -217,13 +231,27 @@ def evaluate_centralized_adam(
             )  # [B, n, n]
 
             objective_fn = objective_multicast_wrapper
-            objective_kwargs = dict(
+            objective_kwargs_train = dict(
                 subgraphs_per_band=subgraphs_per_band,
                 B=B,
                 adj_mat=adj,
-                tau_min=0.0,
-                tau_max=0.0,
+                tau_min=10,
+                tau_max=10,
                 per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
+                eps=1e-12,
+            )
+
+            objective_kwargs_eval = dict(
+                subgraphs_per_band=subgraphs_per_band,
+                B=B,
+                adj_mat=adj,
+                tau_min=0,
+                tau_max=0,
+                per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
                 eps=1e-12,
             )
 
@@ -267,14 +295,29 @@ def evaluate_centralized_adam(
             Z = nn.Parameter(Z0, requires_grad=True)
 
             objective_fn = objective_multicommodity_wrapper
-            objective_kwargs = dict(
+            objective_kwargs_train = dict(
                 paths_k=paths_k,
                 B=B,
                 adj_mat=adj,
                 Z=Z,
-                tau_min=0.0,
-                tau_max=0.0,
+                tau_min=10,
+                tau_max=10,
                 per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
+                eps=1e-12,
+            )
+
+            objective_kwargs_eval = dict(
+                paths_k=paths_k,
+                B=B,
+                adj_mat=adj,
+                Z=Z,
+                tau_min=0,
+                tau_max=0,
+                per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
                 eps=1e-12,
             )
 
@@ -325,14 +368,29 @@ def evaluate_centralized_adam(
             Z = nn.Parameter(Z0, requires_grad=True)
 
             objective_fn = objective_multicommodity_wrapper
-            objective_kwargs = dict(
+            objective_kwargs_train = dict(
                 paths_k=paths_k,
                 B=B,
                 adj_mat=adj,
                 Z=Z,
-                tau_min=0.0,
-                tau_max=0.0,
+                tau_min=10,
+                tau_max=10,
                 per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
+                eps=1e-12,
+            )
+
+            objective_kwargs_eval = dict(
+                paths_k=paths_k,
+                B=B,
+                adj_mat=adj,
+                Z=Z,
+                tau_min=0,
+                tau_max=0,
+                per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
                 eps=1e-12,
             )
 
@@ -384,14 +442,29 @@ def evaluate_centralized_adam(
             Z = nn.Parameter(Z0, requires_grad=True)
 
             objective_fn = objective_multicommodity_wrapper
-            objective_kwargs = dict(
+            objective_kwargs_train = dict(
                 paths_k=paths_k,
                 B=B,
                 adj_mat=adj,
                 Z=Z,
-                tau_min=0.0,
-                tau_max=0.0,
+                tau_min=10,
+                tau_max=10,
                 per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
+                eps=1e-12,
+            )
+
+            objective_kwargs_eval = dict(
+                paths_k=paths_k,
+                B=B,
+                adj_mat=adj,
+                Z=Z,
+                tau_min=0,
+                tau_max=0,
+                per_band=False,
+                ignore_zero_edges=False,
+                power_threshold=1e-8,
                 eps=1e-12,
             )
 
@@ -414,7 +487,7 @@ def evaluate_centralized_adam(
             p_arr=p_arr,
             sigma_noise=sigma,
             objective_fn=objective_fn,
-            objective_kwargs=objective_kwargs,
+            objective_kwargs=objective_kwargs_train,
         )
         p_opt_results.append(p_opt.detach())
 
@@ -423,7 +496,7 @@ def evaluate_centralized_adam(
             links_mat=links,
             P=p_opt,
             sigma_noise=sigma,
-            **objective_kwargs,
+            **objective_kwargs_eval,
         ).item()
         rate_results.append(rate)
 
@@ -629,10 +702,7 @@ def compute_centralized_best_single_channel_rate(
         # 2) MULTICAST: bottleneck baseline
         # ------------------------------------------------------------------
         if problem == "multicast":
-            if isinstance(rx, (list, tuple)):
-                rx_list = list(rx)
-            else:
-                rx_list = [rx]
+            rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
 
             subgraphs = find_multicast_subgraphs(adj, tx, rx_list)
             if (subgraphs is None) or (len(subgraphs) == 0):
@@ -640,16 +710,17 @@ def compute_centralized_best_single_channel_rate(
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            h_band_vals   = []
-            idx_band_best = []
+            best_band = None
+            best_S = None
+            best_val = -float("inf")
 
+            # max_b max_S min_e |h_e^(b)|^2
             for b in range(B):
-                band_sub_min_vals = []
-                band_sub_idx      = []
-
                 for S in subgraphs:
                     if S is None or not torch.any(S):
                         continue
+
+                    S = S.to(device=links.device)
                     edge_idx = S.nonzero(as_tuple=False)
                     if edge_idx.numel() == 0:
                         continue
@@ -657,38 +728,30 @@ def compute_centralized_best_single_channel_rate(
                     rows = edge_idx[:, 0]
                     cols = edge_idx[:, 1]
 
-                    gains = torch.abs(links[b][rows, cols]) ** 2
-                    min_val, argmin = gains.min(dim=0)
-                    min_val = float(min_val.item())
-                    i_min = int(rows[argmin].item())
-                    j_min = int(cols[argmin].item())
+                    gains = torch.abs(links[b, rows, cols]) ** 2
+                    bottleneck = float(gains.min().item())
 
-                    band_sub_min_vals.append(min_val)
-                    band_sub_idx.append((b, i_min, j_min))
+                    if bottleneck > best_val:
+                        best_val = bottleneck
+                        best_band = b
+                        best_S = S
 
-                if band_sub_min_vals:
-                    h_b = max(band_sub_min_vals)
-                    best_idx = band_sub_min_vals.index(h_b)
-                    h_band_vals.append(h_b)
-                    idx_band_best.append(band_sub_idx[best_idx])
-                else:
-                    h_band_vals.append(float("-inf"))
-                    idx_band_best.append(None)
-
-            if all(v == float("-inf") for v in h_band_vals):
+            if best_S is None:
                 lower_bounds.append(0.0)
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            h_best = max(h_band_vals)
-
+            # Activate all edges of the best multicast subgraph on the best single band.
             p = torch.zeros_like(links)
-            best_band_idx = h_band_vals.index(h_best)
-            b_best, i_best, j_best = idx_band_best[best_band_idx]
-            p[b_best, i_best, j_best] = 1.0
-            p_min.append(p)
 
-            subgraphs_per_band = [subgraphs for _ in range(B)]
+            edge_idx = best_S.nonzero(as_tuple=False)
+            rows = edge_idx[:, 0]
+            cols = edge_idx[:, 1]
+
+            p[best_band, rows, cols] = 1.0
+
+            subgraphs_per_band = [[] for _ in range(B)]
+            subgraphs_per_band[best_band] = [best_S]
 
             rate = objective_multicast(
                 h=links,
@@ -703,7 +766,9 @@ def compute_centralized_best_single_channel_rate(
                 ignore_zero_edges=True,
                 power_threshold=1e-8,
             )
+
             lower_bounds.append(float(rate.item()))
+            p_min.append(p)
             continue
 
         # ------------------------------------------------------------------
@@ -752,24 +817,24 @@ def compute_centralized_best_single_channel_rate(
                 else:
                     paths_k_list.append(paths_to_tensor(paths_k, adj.device))
 
-            chosen_edges = [None] * K
+            chosen_paths = [None] * K  # each entry: (b_best, rows_best, cols_best)
 
             for k, paths_k_tensor in enumerate(paths_k_list):
                 if paths_k_tensor is None:
                     continue
 
                 edge_start = paths_k_tensor[:, :-1]
-                edge_end   = paths_k_tensor[:,  1:]
+                edge_end = paths_k_tensor[:, 1:]
                 if edge_start.numel() == 0:
                     continue
 
-                h_band_vals_k   = []
-                idx_band_best_k = []
+                best_val = -float("inf")
+                best_band = None
+                best_rows = None
+                best_cols = None
 
+                # max_b max_path min_edge |h_e^(b)|^2
                 for b in range(B):
-                    band_path_mins = []
-                    band_path_idx  = []
-
                     for row in range(edge_start.shape[0]):
                         es = edge_start[row]
                         ee = edge_end[row]
@@ -777,48 +842,40 @@ def compute_centralized_best_single_channel_rate(
                         if not torch.any(valid_mask):
                             continue
 
-                        rows = es[valid_mask]
-                        cols = ee[valid_mask]
+                        rows = es[valid_mask].long()
+                        cols = ee[valid_mask].long()
 
-                        gains = torch.abs(links[b][rows, cols]) ** 2
+                        gains = torch.abs(links[b, rows, cols]) ** 2
                         if gains.numel() == 0:
                             continue
 
-                        min_val, argmin = gains.min(dim=0)
-                        min_val = float(min_val.item())
-                        i_min = int(rows[argmin].item())
-                        j_min = int(cols[argmin].item())
+                        bottleneck = float(gains.min().item())
 
-                        band_path_mins.append(min_val)
-                        band_path_idx.append((b, i_min, j_min))
+                        if bottleneck > best_val:
+                            best_val = bottleneck
+                            best_band = b
+                            best_rows = rows.clone()
+                            best_cols = cols.clone()
 
-                    if band_path_mins:
-                        h_b = max(band_path_mins)
-                        best_idx = band_path_mins.index(h_b)
-                        h_band_vals_k.append(h_b)
-                        idx_band_best_k.append(band_path_idx[best_idx])
-                    else:
-                        h_band_vals_k.append(float("-inf"))
-                        idx_band_best_k.append(None)
+                if best_band is not None:
+                    chosen_paths[k] = (best_band, best_rows, best_cols)
 
-                if all(v == float("-inf") for v in h_band_vals_k):
+            p_multi = torch.zeros((B, K, n, n), dtype=links.real.dtype, device=links.device)
+            z_multi = torch.zeros((B, K, n, n), dtype=links.real.dtype, device=links.device)
+
+            amp = 1.0 / max(K ** 0.5, 1)
+
+            for k, chosen in enumerate(chosen_paths):
+                if chosen is None:
                     continue
 
-                h_k = max(h_band_vals_k)
-                best_band_idx = h_band_vals_k.index(h_k)
-                chosen_edges[k] = idx_band_best_k[best_band_idx]
+                b_best, rows_best, cols_best = chosen
 
-            p_multi = torch.zeros((B, K, n, n), dtype=links.dtype, device=links.device)
-            z_multi = torch.zeros_like(p_multi, dtype=links.dtype)
+                # Activate every edge on the selected widest path.
+                p_multi[b_best, k, rows_best, cols_best] = amp
+                z_multi[b_best, k, rows_best, cols_best] = 1.0
 
-            for k, edge in enumerate(chosen_edges):
-                if edge is None:
-                    continue
-                b_best, i_best, j_best = edge
-                p_multi[b_best, k, i_best, j_best] = 1.0 / K
-                z_multi[b_best, k, i_best, j_best] = 1.0
-
-            if not any(edge is not None for edge in chosen_edges):
+            if not any(chosen is not None for chosen in chosen_paths):
                 lower_bounds.append(0.0)
                 p_min.append(torch.zeros_like(links))
                 continue
@@ -1171,41 +1228,89 @@ def compute_decentralized_best_single_channel_rate(
         # MULTICAST
         # ------------------------------------------------------------
         if problem == "multicast":
-            p = torch.zeros_like(links)
+            rx_list = data.rx
+            if isinstance(rx_list, torch.Tensor):
+                rx_list = rx_list.view(-1).tolist()
+            if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
+                rx_list = rx_list[0]
+            rx_list = [int(r) for r in rx_list]
 
-            valid_paths = [path for path in selected_paths if path is not None]
+            tx = int(data.tx)
 
-            if len(valid_paths) == 0:
+            best_band = None
+            best_paths = None
+            best_S = None
+            best_val = -float("inf")
+
+            # For each band, construct a multicast subgraph by taking the
+            # distributed widest path from tx to each receiver on that same band.
+            # Then score the resulting subgraph by its bottleneck edge.
+            for b in range(B):
+                channel_power_b = links[b].abs() ** 2
+
+                paths_b = []
+                valid = True
+
+                for r in rx_list:
+                    path_r, _, _ = distributed_widest_path_single_band(
+                        adj=adj,
+                        channel_power_b=channel_power_b,
+                        tx=tx,
+                        rx=r,
+                        max_iters=max_iters,
+                        eps=eps,
+                    )
+
+                    if path_r is None:
+                        valid = False
+                        break
+
+                    paths_b.append(path_r)
+
+                if not valid:
+                    continue
+
+                S_b = _paths_to_multicast_subgraph(paths_b, n, device)
+                edge_idx = S_b.nonzero(as_tuple=False)
+
+                if edge_idx.numel() == 0:
+                    continue
+
+                rows = edge_idx[:, 0]
+                cols = edge_idx[:, 1]
+
+                bottleneck = float(channel_power_b[rows, cols].min().item())
+
+                if bottleneck > best_val:
+                    best_val = bottleneck
+                    best_band = b
+                    best_paths = paths_b
+                    best_S = S_b
+
+            if best_S is None:
+                p = torch.zeros_like(links)
                 rates.append(0.0)
                 p_store.append(p)
                 aux_store.append(
                     {
-                        "paths": selected_paths,
-                        "bands": selected_bands,
-                        "bottlenecks": selected_bottlenecks,
+                        "paths": [],
+                        "bands": [],
+                        "bottlenecks": [],
                     }
                 )
                 continue
 
-            # For multicast, each receiver may select a different best band.
-            # We build one union subgraph per band.
-            subgraphs_per_band = []
-            for b in range(B):
-                paths_b = [
-                    path for path, band in zip(selected_paths, selected_bands)
-                    if path is not None and band == b
-                ]
+            # Activate all edges of the selected multicast subgraph on the best single band.
+            p = torch.zeros_like(links)
 
-                if len(paths_b) == 0:
-                    subgraphs_per_band.append([])
-                    continue
+            edge_idx = best_S.nonzero(as_tuple=False)
+            rows = edge_idx[:, 0]
+            cols = edge_idx[:, 1]
 
-                S_b = _paths_to_multicast_subgraph(paths_b, n, device)
-                subgraphs_per_band.append([S_b])
+            p[best_band, rows, cols] = 1.0
 
-                for path in paths_b:
-                    for u, v in zip(path[:-1], path[1:]):
-                        p[b, u, v] = 1.0
+            subgraphs_per_band = [[] for _ in range(B)]
+            subgraphs_per_band[best_band] = [best_S]
 
             rate = objective_multicast(
                 h=links,
@@ -1225,9 +1330,9 @@ def compute_decentralized_best_single_channel_rate(
             p_store.append(p.detach())
             aux_store.append(
                 {
-                    "paths": selected_paths,
-                    "bands": selected_bands,
-                    "bottlenecks": selected_bottlenecks,
+                    "paths": best_paths,
+                    "bands": [best_band],
+                    "bottlenecks": [best_val],
                     "subgraphs_per_band": subgraphs_per_band,
                 }
             )
@@ -1460,12 +1565,11 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             for k in range(K):
                 P[:, k] = init_equal_power(torch.zeros(B, n, n, device=device), adj)
 
-            # normalize per-message
-            for k in range(K):
-                P[:, k] = normalize_power(P[:, k], adj).to(device)
+            # normalize power
+            P = normalize_power(P, adj).to(device)
 
             # routing matrix initialized to binary adjacency mask
-            Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, K, n, n).to(device)
+            Z = Z = (P > 1e-8).float().to(device)
 
             rate = objective_multicommodity(
                 h=h,
@@ -1513,7 +1617,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
       - Build one message-specific shortest path per commodity/message.
       - Allocate P[b,k,u,v] = 1/sqrt(B) on each hop of the chosen path.
       - Pass P (and routing Z from adjacency) into objective_multicommodity
-        (after per-message normalization).
+        (after joint per-node normalization over bands, messages, and outgoing links).
 
         * MULTI:         one Tx, K receivers
         * CONVERGE:      K transmitters, one Rx
@@ -1555,7 +1659,8 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
             P = _build_P_from_path_single(h, chosen_path)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
 
-            paths_tensor = paths_to_tensor(all_paths, device)
+            # paths_tensor = paths_to_tensor(all_paths, device)
+            paths_tensor = paths_to_tensor([chosen_path], device)
             rate = calc_sum_rate(
                 h_arr=h,
                 p_arr=P,
@@ -1580,16 +1685,36 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
             if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
                 rx_list = rx_list[0]
 
-            subgraphs = find_multicast_subgraphs(adj.cpu(), data.tx, rx_list)
-            if (subgraphs is None) or (len(subgraphs) == 0):
+            # subgraphs = find_multicast_subgraphs(adj.cpu(), data.tx, rx_list)
+            # if (subgraphs is None) or (len(subgraphs) == 0):
+            #     rate_bounds.append(0.0)
+            #     continue
+            #
+            # best_sg = _select_shortest_subgraph(subgraphs)
+            # if best_sg is None:
+            #     rate_bounds.append(0.0)
+            #     continue
+            #
+            # subgraphs_per_band = [[best_sg] for _ in range(B)]
+            paths = []
+            valid = True
+
+            for r in rx_list:
+                all_paths_r = find_all_paths(adj.cpu(), int(data.tx), int(r))
+                if not all_paths_r:
+                    valid = False
+                    break
+
+                lengths = [len(p) - 1 for p in all_paths_r]
+                min_len = min(lengths)
+                shortest_paths = [p for p, L in zip(all_paths_r, lengths) if L == min_len]
+                paths.append(random.choice(shortest_paths))
+
+            if not valid:
                 rate_bounds.append(0.0)
                 continue
 
-            best_sg = _select_shortest_subgraph(subgraphs)
-            if best_sg is None:
-                rate_bounds.append(0.0)
-                continue
-
+            best_sg = _paths_to_multicast_subgraph(paths, n, device)
             subgraphs_per_band = [[best_sg] for _ in range(B)]
 
             P = _build_P_from_multicast_subgraph(h, adj, best_sg)   # [B,n,n]
@@ -1604,6 +1729,8 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
                 tau_min=0.0,
                 tau_max=0.0,
                 per_band=False,
+                ignore_zero_edges=True,
+                power_threshold=1e-10,
                 eps=1e-12,
             )
             rate_bounds.append(rate.item())
@@ -1666,9 +1793,8 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
             # Assumes helper accepts one list of paths per message, regardless of problem semantics
             P = _build_P_from_paths_multi(h, paths_k_lists, K)  # [B,K,n,n]
 
-            # normalize per message
-            for k in range(K):
-                P[:, k] = normalize_power(P[:, k], adj).to(device)
+            # normalize power
+            P = normalize_power(P, adj).to(device)
 
             # paths_k in tensor form for the objective
             paths_k_tensors = [
@@ -1676,7 +1802,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
                 for pk in paths_k_lists
             ]
 
-            Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, K, n, n).to(device)
+            Z = (P > 1e-8).float().to(device)
 
             rate = objective_multicommodity(
                 h=h,
@@ -1780,7 +1906,6 @@ def compute_decentralized_greedy_power_rate(
             P = normalize_power(P, adj).to(device)
 
             paths_tensor = paths_to_tensor([chosen_path], device)
-
             rate = calc_sum_rate(
                 h_arr=h,
                 p_arr=P,
@@ -1924,8 +2049,7 @@ def compute_decentralized_greedy_power_rate(
 
             P = _build_P_from_paths_multi(h, paths_k, K)
 
-            for k in range(len(paths_k)):
-                P[:, k] = normalize_power(P[:, k], adj).to(device)
+            P = normalize_power(P, adj).to(device)
 
             paths_k_tensors = [
                 paths_to_tensor([path], device)
@@ -1933,7 +2057,7 @@ def compute_decentralized_greedy_power_rate(
                 for path in paths_k
             ]
 
-            Z = adj.bool().float().unsqueeze(0).unsqueeze(0).expand(B, len(paths_k), n, n).to(device)
+            Z = (P > 1e-8).float().to(device)
 
             rate = objective_multicommodity(
                 h=h,
@@ -2066,28 +2190,29 @@ def _build_P_from_paths_multi(h, paths_k, K):
 def _select_shortest_subgraph(subgraphs):
     """
     Choose the subgraph with the smallest number of links.
-
-    You MUST adapt this depending on how a 'subgraph' is represented
-    in your code. The simplest case is that each subgraph is a dict
-    with an 'edges' field listing (u,v) pairs.
     """
     if not subgraphs:
         return None
 
-    # Example assumption: each subgraph is dict-like: {'edges': [(u,v), ...], ...}
     def num_edges(sg):
+        if torch.is_tensor(sg):
+            return int(torch.count_nonzero(sg).item())
+
         if isinstance(sg, dict) and "edges" in sg:
             return len(sg["edges"])
-        # Fallback: if sg itself is a list of edges
+
         if isinstance(sg, (list, tuple)) and sg and isinstance(sg[0], (list, tuple)):
             return len(sg)
-        # Otherwise, treat as 0 (you should refine this to match your real structure)
-        return 0
+
+        return float("inf")
 
     edge_counts = [num_edges(sg) for sg in subgraphs]
     min_edges = min(edge_counts)
-    candidates = [sg for sg, c in zip(subgraphs, edge_counts) if c == min_edges]
 
+    if min_edges == float("inf"):
+        return None
+
+    candidates = [sg for sg, c in zip(subgraphs, edge_counts) if c == min_edges]
     return random.choice(candidates)
 
 

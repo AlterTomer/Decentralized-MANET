@@ -30,8 +30,8 @@ def normalize_power(p_arr: torch.Tensor, adj: torch.Tensor, eps: float = 1e-12) 
     Project power allocation onto a per-node L2 ball (≤ 1), masked by adjacency.
 
     Supported shapes:
-      • [B, n, n]       (bands, src, dst)
-      • [B, K, n, n]    (bands, commodities, src, dst)
+      • [B, n, n] (bands, src, dst)
+      • [B, K, n, n] (bands, commodities, src, dst)
 
     Semantics: For each node i, the L2 norm of *all outgoing* powers
     across all active (band × [commodity] × neighbors) is ≤ 1.

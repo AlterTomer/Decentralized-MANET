@@ -192,5 +192,7 @@ def objective_multicast_wrapper(
         tau_max=tau_max,
         eps=eps,
         per_band=per_band,
+        ignore_zero_edges=kwargs.get("ignore_zero_edges", False),
+        power_threshold=kwargs.get("power_threshold", 1e-8),
     )
 
