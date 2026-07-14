@@ -133,6 +133,18 @@ def parse_args(cfg_path):
     # FFN-specific parameters. These can be added to the same ini file.
     hidden_dim = int(train_params.get("hidden_dim", 512))
     num_layers = int(train_params.get("num_layers", 4))
+    # Noise conditioning (0 = off). Appends a global SNR feature to the flattened CSI input so
+    # the FFN can adapt its allocation to the operating SNR (otherwise it is noise-blind). Changes
+    # the input dim, so it requires a retrain. Must match the benchmark-side FFN construction.
+    noise_conditioning = int(train_params.get("noise conditioning", 0)) == 1
+    # LMMSE estimated-CSI training (0 = off). When on, the FFN forwards on the LMMSE estimate
+    # H_hat but computes loss/backprop on the TRUE CSI (same scheme as the GNN). The FFN model
+    # is unchanged; only the training loop swaps the forward input (no input-dim change).
+    est_csi = int(train_params.get("LMMSE estimation", 0)) == 1
+    if est_csi == 0:
+        print("Full CSI training.")
+    else:
+        print("LMMSE CSI training.")
 
     raw_tx = train_params["tx"].strip()
     raw_rx = train_params["rx"].strip()
@@ -185,6 +197,8 @@ def parse_args(cfg_path):
         val_ratio=val_ratio,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
+        noise_conditioning=noise_conditioning,
+        est_csi=est_csi,
         tx=tx,
         rx=rx,
         K_cfg=K_cfg,
@@ -223,10 +237,12 @@ def build_sigma_list(SNR, num_samples, seed=None):
     list[float]
         Noise values, one per sample.
     """
+    # SNR_dB = 10*log10(1/sigma^2)  =>  sigma = 10^(-SNR/20)  (channel variance ~= 1).
+    # Matches the benchmark convention in utils/ComparisonUtils.py (sigma = sqrt(var/snr)).
     if isinstance(SNR, int):
-        sigma_vals = np.array([10 ** (-SNR / 10)])
+        sigma_vals = np.array([10 ** (-SNR / 20)])
     else:
-        sigma_vals = np.array([10 ** (-s / 10) for s in SNR])
+        sigma_vals = np.array([10 ** (-s / 20) for s in SNR])
 
     base = num_samples // len(sigma_vals)
     remainder = num_samples % len(sigma_vals)
@@ -523,7 +539,8 @@ def objective_ffn_single(h, p, sigma, adj, tx, rx):
         sigma=sigma,
         paths_tensor=paths_tensor,
         B=h.shape[0],
-        tau=0.0,
+        tau_min=0.0,
+        tau_max=0.0,
         eps=1e-12,
         per_band=False,
         ignore_zero_edges=False,
@@ -583,7 +600,7 @@ def objective_ffn_multicast(h, p, sigma, adj, tx, rx):
     )
 
 
-def objective_ffn_multicommodity(h, p, sigma, adj, tx, rx, problem):
+def objective_ffn_multicommodity(h, p, sigma, adj, tx, rx, problem, reduce="fair"):
     """
     Multi-message FFN objective wrapper for:
         - multi
@@ -667,14 +684,14 @@ def objective_ffn_multicommodity(h, p, sigma, adj, tx, rx, problem):
         paths_k=paths_k,
         tau_min=0.0,
         tau_max=0.0,
-        reduce="mean",
+        reduce=reduce,
         per_band=False,
         outage_as_neg_inf=False,
         ignore_zero_edges=False,
     )
 
 
-def select_ffn_objective(problem):
+def select_ffn_objective(problem, reduce="fair"):
     """
     Select an FFN-compatible objective wrapper.
 
@@ -706,6 +723,7 @@ def select_ffn_objective(problem):
             tx=tx,
             rx=rx,
             problem=problem,
+            reduce=reduce,
         )
 
     raise ValueError(f"Unknown problem: {problem}")
@@ -785,6 +803,8 @@ def main(cfg_path):
         val_ratio=cfg.val_ratio,
         hidden_dim=cfg.hidden_dim,
         num_layers=cfg.num_layers,
+        noise_conditioning=cfg.noise_conditioning,
+        est_csi=cfg.est_csi,
         dropout=cfg.dropout,
         lr=cfg.lr,
         weight_decay=cfg.weight_decay,
@@ -800,8 +820,15 @@ def main(cfg_path):
     print(f"Training time = {(time() - t0) / 60:.3f} mins")
     print(f"Best validation rate = {max(history['val_rate']):.6f}")
     print(f"Saved FFN results to: {save_dir}")
+    print('======================================================')
+    print(f'Done training FFN mode: {cfg.mode}')
+    print('======================================================')
 
 
 if __name__ == "__main__":
-    cfg_path = r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multiunicast\FFN_multiunicast.ini"
-    main(cfg_path)
+    cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Single Tx-Rx\FFN_single.ini",
+               r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multiunicast\FFN_multiunicast.ini",
+               r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multicommodity\FFN_multicommodity.ini",
+               r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multicast\FFN_multicast.ini"]
+    for cfg_path in cfg_arr:
+        main(cfg_path)

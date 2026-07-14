@@ -49,7 +49,11 @@ def normalize_power(p_arr: torch.Tensor, adj: torch.Tensor, eps: float = 1e-12) 
 
     if p_arr.dim() == 3:
         B, n, _ = p_arr.shape
-        mask_f = adj_mask.repeat(B, 1).T.reshape(n, B * n).float()
+        # p_flat[i, b*n + j] = p[b, i, j], so the matching mask is adj[i, j] tiled
+        # over bands: mask_f[i, b*n + j] = adj[i, j]. (The previous construction
+        # `repeat(B,1).T` indexed adj[j, i] — transposed; identical for the symmetric
+        # adjacencies used here, but wrong for directed graphs.)
+        mask_f = adj_mask.float().repeat(1, B)             # [n, B*n]
         p_flat = p_arr.permute(1, 0, 2).reshape(n, B * n)  # [n, B*n]
         p_masked = p_flat * mask_f
         norms = p_masked.norm(p=2, dim=1, keepdim=True).clamp_min(eps)
@@ -59,7 +63,8 @@ def normalize_power(p_arr: torch.Tensor, adj: torch.Tensor, eps: float = 1e-12) 
 
     elif p_arr.dim() == 4:
         B, K, n, _ = p_arr.shape
-        mask_f = adj_mask.repeat(B * K, 1).T.reshape(n, B * K * n).float()
+        # p_flat[i, (b*K + k)*n + j] = p[b, k, i, j] -> mask is adj[i, j] tiled B*K times.
+        mask_f = adj_mask.float().repeat(1, B * K)                # [n, B*K*n]
         p_flat = p_arr.permute(2, 0, 1, 3).reshape(n, B * K * n)  # [n, B*K*n]
         p_masked = p_flat * mask_f
         norms = p_masked.norm(p=2, dim=1, keepdim=True).clamp_min(eps)

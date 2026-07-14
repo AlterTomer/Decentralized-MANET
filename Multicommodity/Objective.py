@@ -100,7 +100,7 @@ def objective_multicommodity(
     *,
     tau_min: float = 0.0,
     tau_max: float = 0.0,
-    reduce: str = "mean",
+    reduce: str = "fair",
     per_band: bool = False,
     outage_as_neg_inf: bool = False,
     ignore_zero_edges: bool = False,
@@ -203,6 +203,31 @@ def objective_multicommodity(
     if reduce == "sum":
         return r_bk.sum()
 
+    if reduce == "fair":
+        # Sum over bands (eq 9), then HARD max-min over messages (eq 10: min_k R^E2E_k).
+        # This is the paper's REPORTED metric — use it at EVAL. It is a poor TRAINING
+        # objective: with soft edges (tau schedule) the min carries almost no gradient and
+        # the "soft-worst" commodity != the "hard-worst" one, so direct max-min training
+        # collapses. Train on `pf` (proportional fairness) instead and report `fair`.
+        # (A soft-min over messages was also tried and reverted — it lets training rob the
+        # hardest commodity to inflate the soft average while the true min collapses.)
+        R_k = r_bk.sum(dim=0)  # [K]
+        return R_k.min()
+
+    if reduce == "pf":
+        # Proportional fairness: maximize sum_k log(R^E2E_k). A TRAINING surrogate for
+        # max-min: smooth like `mean` (no brittle hard-min collapse) but it CANNOT abandon
+        # a commodity — log(R_k)->-inf as R_k->0 and the gradient 1/R_k is LARGEST on the
+        # weakest commodity, so training lifts the worst flow instead of dropping it (unlike
+        # sum/mean, which serve one commodity and zero the rest here). Evaluate on `fair`.
+        # Additive floor keeps a finite gradient that pushes near-zero commodities UP
+        # (clamp_min would zero the gradient there and let them stay dead). Keep the floor
+        # SMALL: a large floor caps the -inf abandonment penalty and lets PF drop a flow
+        # when survivors gain a lot; 1e-4 makes dropping any commodity strongly dominant-
+        # negative. The 1/(R_k+eps) spike at R_k~0 is bounded by grad_clip.
+        R_k = r_bk.sum(dim=0)  # [K]
+        return torch.log(R_k + 1e-4).sum()
+
     return r_bk.mean()
 
 
@@ -219,6 +244,7 @@ def objective_multicommodity_wrapper(
     *,
     adj_mat=None,
     Z=None,
+    reduce: str = "fair",
     **kwargs,
 ):
     """
@@ -244,7 +270,7 @@ def objective_multicommodity_wrapper(
         paths_k=paths_k,
         tau_min=tau_min,
         tau_max=tau_max,
-        reduce="mean",
+        reduce=reduce,  # "fair" = eq (10) min over messages, bands summed per eq (9)
         per_band=per_band,
         outage_as_neg_inf=False,
     )

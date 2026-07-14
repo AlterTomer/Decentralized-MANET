@@ -167,7 +167,8 @@ def objective_multicast(
         else:
             r_band[b] = sub_vals.max()
 
-    return r_band if per_band else r_band.mean()
+    # Sum over bands (paper eq 9: R^E2E = sum_b max_subgraph min_edge R^(b)).
+    return r_band if per_band else r_band.sum()
 
 
 def objective_multicast_wrapper(

@@ -13,6 +13,7 @@ def run_epoch(
     normalize_power,
     optimizer=None,
     device="cuda",
+    est_lookup=None,
 ):
     """
     Run one training or validation epoch.
@@ -44,8 +45,20 @@ def run_epoch(
         batch = move_batch_to_device(batch, device)
         h, adj, sigma, tx, rx = unpack_batch(batch)
 
+        # Estimated-CSI training: forward on the LMMSE estimate H_hat (looked up by
+        # sample_id), but compute the objective/backprop on the TRUE CSI h. Mirrors the
+        # GNN (GraphNetAux.train_chained). est_lookup=None -> forward on true CSI.
+        h_fwd = h
+        if est_lookup is not None:
+            sid = batch.get("sample_id", None)
+            if sid is not None:
+                sid = int(sid.reshape(-1)[0].item()) if isinstance(sid, torch.Tensor) else int(sid)
+                h_hat = est_lookup.get(sid, None)
+                if h_hat is not None:
+                    h_fwd = h_hat.to(device)
+
         with torch.set_grad_enabled(is_train):
-            p_raw = model(h).squeeze(0)
+            p_raw = model(h_fwd, sigma=sigma).squeeze(0)
             p = normalize_power(p_raw, adj)
 
             rate = objective_fn(h, p, sigma, adj, tx, rx)
@@ -105,6 +118,10 @@ def train_ffn(
     seed=0,
     device=None,
     save_dir="ffn_results",
+    noise_conditioning=False,
+    est_csi=False,
+    est_pilots_M=4,
+    est_pilot_power=1.0,
 ):
     """
     Train the FFN benchmark and save checkpoint/learning curves.
@@ -214,9 +231,62 @@ def train_ffn(
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         dropout=dropout,
+        noise_conditioning=noise_conditioning,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # ====== Estimated-CSI (LMMSE) lookups (optional) ======
+    # When est_csi is on, precompute per-sample LMMSE estimates H_hat once (deterministic
+    # per-sample seed) for the train and val splits. run_epoch then forwards the model on
+    # H_hat but scores/backprops on the TRUE CSI -- the same scheme the GNN uses. FFNDataset
+    # yields dicts, but EstimationUtils expects attribute access, so wrap each sample in a
+    # SimpleNamespace (reuses the exact LMMSE core; no duplicated estimation logic).
+    train_est_lookup = None
+    val_est_lookup = None
+    if est_csi:
+        from types import SimpleNamespace
+        from utils.EstimationUtils import (
+            masked_band_variance_from_dataset,
+            precompute_csi_estimates,
+            build_estimate_lookup,
+        )
+
+        class _AttrView:
+            """Expose dict-style FFNDataset samples via attributes for EstimationUtils."""
+
+            def __init__(self, ds):
+                self.ds = ds
+
+            def __len__(self):
+                return len(self.ds)
+
+            def __getitem__(self, i):
+                return SimpleNamespace(**self.ds[i])
+
+        def _build_lookup(split_ds):
+            view = _AttrView(split_ds)
+            prior_var = masked_band_variance_from_dataset(view)
+            est = precompute_csi_estimates(
+                view,
+                pilots_M=est_pilots_M,
+                pilot_power=est_pilot_power,
+                prior_var=prior_var,
+                est_noise_std=None,
+                seed=seed,
+                device=device,
+            )
+            return build_estimate_lookup(est)
+
+        train_est_lookup = _build_lookup(train_dataset)
+        val_est_lookup = _build_lookup(val_dataset)
+        print(
+            f"Estimated CSI model: LMMSE lookups built "
+            f"(train={len(train_est_lookup)}, val={len(val_est_lookup)}, "
+            f"pilots_M={est_pilots_M}, pilot_power={est_pilot_power})."
+        )
+    else:
+        print("True CSI model (FFN forward on true CSI).")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -239,6 +309,7 @@ def train_ffn(
             normalize_power=normalize_power,
             optimizer=optimizer,
             device=device,
+            est_lookup=train_est_lookup,
         )
 
         val_loss, val_rate, val_count = run_epoch(
@@ -248,6 +319,7 @@ def train_ffn(
             normalize_power=normalize_power,
             optimizer=None,
             device=device,
+            est_lookup=val_est_lookup,
         )
 
         history["train_loss"].append(train_loss)
@@ -289,6 +361,8 @@ def train_ffn(
                 "num_epochs": num_epochs,
                 "batch_size": batch_size,
                 "seed": seed,
+                "noise_conditioning": noise_conditioning,
+                "est_csi": est_csi,
                 "best_val_rate": best_val_rate,
             },
         },

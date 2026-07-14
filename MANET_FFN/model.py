@@ -52,6 +52,7 @@ class FFNPowerAllocator(nn.Module):
         num_layers: int = 4,
         dropout: float = 0.1,
         use_layernorm: bool = True,
+        noise_conditioning: bool = False,
     ):
         super().__init__()
 
@@ -60,9 +61,14 @@ class FFNPowerAllocator(nn.Module):
         self.K = int(K)
         self.problem = problem.lower()
         self.multi_like = self.problem in {"multi", "converge", "multiunicast"}
+        # noise_conditioning: append a global SNR feature (-log10(sigma^2)/5 ~ SNR/50) to the
+        # flattened CSI input so the FFN can adapt its allocation to the operating SNR. Without
+        # it the FFN is noise-blind (CSI carries no sigma) -> one fixed allocation at every SNR,
+        # the same blind spot the GNN had. Off by default (existing checkpoints load unchanged).
+        self.noise_conditioning = bool(noise_conditioning)
 
-        # Input = flattened [Re(H), Im(H)], where H has shape [B, n, n].
-        input_dim = 2 * self.n_bands * self.n_nodes * self.n_nodes
+        # Input = flattened [Re(H), Im(H)], where H has shape [B, n, n] (+1 for the SNR feature).
+        input_dim = 2 * self.n_bands * self.n_nodes * self.n_nodes + (1 if self.noise_conditioning else 0)
 
         # Output = one raw amplitude per band/edge, and per commodity if needed.
         if self.multi_like:
@@ -85,7 +91,7 @@ class FFNPowerAllocator(nn.Module):
         layers.append(nn.Linear(dim, output_dim))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, h: torch.Tensor):
+    def forward(self, h: torch.Tensor, sigma=None):
         """
         Forward pass.
 
@@ -93,6 +99,9 @@ class FFNPowerAllocator(nn.Module):
         ----------
         h : torch.Tensor
             Complex CSI tensor with shape [B, n, n] or [batch, B, n, n].
+        sigma : float | torch.Tensor | None
+            Noise std for the sample(s). Used only when noise_conditioning is enabled;
+            appended as a global SNR feature. Ignored otherwise (safe to always pass).
 
         Returns
         -------
@@ -109,6 +118,17 @@ class FFNPowerAllocator(nn.Module):
         # Convert complex CSI into real-valued features.
         x = torch.cat([h.real, h.imag], dim=1)  # [batch, 2B, n, n]
         x = x.reshape(batch_size, -1)
+
+        # Noise conditioning: append a global SNR feature (-log10(sigma^2)/5 ~ SNR_dB/50).
+        if self.noise_conditioning:
+            if sigma is None:
+                snr = x.new_zeros(batch_size, 1)
+            else:
+                s = torch.as_tensor(sigma, device=x.device, dtype=x.dtype).reshape(-1)
+                snr_val = -torch.log10(s * s + 1e-12) / 5.0
+                snr = (snr_val.reshape(1, 1).expand(batch_size, 1)
+                       if snr_val.numel() == 1 else snr_val.reshape(batch_size, 1))
+            x = torch.cat([x, snr], dim=1)
 
         # Softplus enforces smooth non-negative amplitudes.
         out = F.softplus(self.net(x))

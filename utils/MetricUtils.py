@@ -28,7 +28,8 @@ def calc_sum_rate(
     sigma,
     paths_tensor,
     B,
-    tau: float = 0.0,
+    tau_min: float = 0.0,
+    tau_max: float = 0.0,
     eps: float = 1e-12,
     per_band: bool = False,
     ignore_zero_edges: bool = False,
@@ -123,9 +124,9 @@ def calc_sum_rate(
             torch.full_like(link_rates, float("inf")),
         )
 
-        if tau and tau > 0.0:
-            path_min_rates = (-1.0 / tau) * torch.logsumexp(
-                -tau * masked_link_rates,
+        if tau_min and tau_min > 0.0:
+            path_min_rates = (-1.0 / tau_min) * torch.logsumexp(
+                -tau_min * masked_link_rates,
                 dim=2,
             )
         else:
@@ -144,20 +145,28 @@ def calc_sum_rate(
             torch.full_like(link_rates, float("inf")),
         )
 
-        if tau and tau > 0.0:
-            path_min_rates = (-1.0 / tau) * torch.logsumexp(
-                -tau * masked_link_rates,
+        if tau_min and tau_min > 0.0:
+            path_min_rates = (-1.0 / tau_min) * torch.logsumexp(
+                -tau_min * masked_link_rates,
                 dim=2,
             )
         else:
             path_min_rates, _ = masked_link_rates.min(dim=2)
 
-    max_path_rates, _ = path_min_rates.max(dim=1)
+    if tau_max and tau_max > 0.0:
+        max_path_rates = (1.0 / tau_max) * torch.logsumexp(
+            tau_max * path_min_rates,
+            dim=1,
+        )
+    else:
+        max_path_rates, _ = path_min_rates.max(dim=1)
 
     if per_band:
         return max_path_rates
 
-    return max_path_rates.mean()
+    # Sum over bands (paper eq 9: R^E2E = sum_b max_path min_edge R^(b)); each band
+    # independently selects its best route, and the per-band bottleneck rates add.
+    return max_path_rates.sum()
 
 
 def objective_single_wrapper(
@@ -166,7 +175,8 @@ def objective_single_wrapper(
     sigma_noise,
     paths,
     B,
-    tau: float = 0.0,
+    tau_min: float = 0.0,
+    tau_max: float = 0.0,
     eps: float = 1e-12,
     per_band: bool = False,
     **kwargs,
@@ -180,7 +190,8 @@ def objective_single_wrapper(
         sigma=sigma_noise,
         paths_tensor=paths,
         B=B,
-        tau=tau,
+        tau_min=tau_min,
+        tau_max=tau_max,
         eps=eps,
         per_band=per_band,
     )

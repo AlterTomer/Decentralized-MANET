@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,6 +13,36 @@ from Multicommodity.Objective import  objective_multicommodity_wrapper, objectiv
 from MANET_FFN.MANET_FFN_Utils import *
 from MANET_FFN.main import select_ffn_objective
 
+
+# ---- SNR-independent topology memoization (used by the benchmark SNR sweep) ----
+# Path enumeration / subgraph search depend only on the graph, not on sigma, so the
+# benchmark re-derives them 26x (once per SNR). These helpers memoize the RAW result
+# per (sample index, endpoints) so it is computed once and reused. They return the
+# SAME object on a hit — callers must treat it as read-only (all current call sites do:
+# they only enumerate / index / list-comprehend it, never mutate in place). Passing
+# cache=None disables memoization and preserves the original behavior exactly.
+def _cached_all_paths(cache, idx, adj, s, t):
+    if cache is None:
+        return find_all_paths(adj, s, t)
+    key = ("p", idx, int(s), int(t))
+    hit = cache.get(key)
+    if hit is None:
+        hit = find_all_paths(adj, s, t)
+        cache[key] = hit
+    return hit
+
+
+def _cached_subgraphs(cache, idx, adj, src, receivers):
+    if cache is None:
+        return find_multicast_subgraphs(adj, src, receivers)
+    key = ("sg", idx, int(src), tuple(int(r) for r in receivers))
+    hit = cache.get(key)
+    if hit is None:
+        hit = find_multicast_subgraphs(adj, src, receivers)
+        cache[key] = hit
+    return hit
+
+
 #========================================== Centralized Optimizer ======================================================
 def classic_opt(
     num_iterations,
@@ -22,9 +53,18 @@ def classic_opt(
     sigma_noise,
     objective_fn,
     objective_kwargs,
+    objective_kwargs_eval=None,
 ):
     """
     Runs centralized ADAM optimization for power allocation, with a generic objective.
+
+    Returns the *best* iterate seen (highest evaluation objective), not the last one,
+    so a transient bad optimizer step can never degrade the reported allocation (this
+    also removes the non-monotone dips observed across SNR). Iterate selection uses
+    `objective_kwargs_eval` (the hard tau=0 objective) when provided, otherwise the
+    training objective. Because the returned P is the best iterate rather than the
+    last, warm-starting from a strong feasible point (e.g. greedy) guarantees the
+    result is no worse than that starting point.
 
     Args:
         num_iterations (int): Number of optimization steps.
@@ -35,15 +75,38 @@ def classic_opt(
         sigma_noise (float): Noise std (σ) or equivalent.
         objective_fn (callable): Function that computes the scalar objective given
                                  (links_mat, p_arr, sigma_noise, **objective_kwargs).
-        objective_kwargs (dict): Extra arguments specific to the problem (paths,
-                                 subgraphs, tx/rx lists, etc.).
+        objective_kwargs (dict): Training-objective kwargs (paths/subgraphs, tau, ...).
+        objective_kwargs_eval (dict | None): Evaluation-objective kwargs used to score
+                                 iterates for best-iterate selection (hard tau=0). If
+                                 None, the training kwargs are reused.
 
     Returns:
-        torch.Tensor: Optimized power allocation tensor.
+        torch.Tensor: Best power allocation tensor found across iterations.
     """
-    a = 0
+    eval_kwargs = objective_kwargs_eval if objective_kwargs_eval is not None else objective_kwargs
+
+    # For multi-message problems the routing tensor Z is optimized alongside P and is
+    # passed through the kwargs. Snapshot it so the returned best-P has a matching Z.
+    z_param = objective_kwargs.get("Z", None)
+    z_is_tensor = isinstance(z_param, torch.Tensor)
+
+    def _eval(p_detached):
+        with torch.no_grad():
+            return float(
+                objective_fn(
+                    links_mat=links_mat,
+                    P=p_detached,
+                    sigma_noise=sigma_noise,
+                    **eval_kwargs,
+                ).item()
+            )
+
     with torch.no_grad():
         p_arr.copy_(normalize_power(p_arr, adj_mat))
+
+    best_p = p_arr.detach().clone()
+    best_z = z_param.detach().clone() if z_is_tensor else None
+    best_val = _eval(best_p)
 
     for i in range(num_iterations):
         optimizer.zero_grad()
@@ -60,15 +123,24 @@ def classic_opt(
             loss.backward()
             optimizer.step()
         except RuntimeError:
-            a = 1
-            p0 = p_arr.detach().clone()
-            p0 = normalize_power(p0, adj_mat)
             break
 
         with torch.no_grad():
             p_arr.copy_(normalize_power(p_arr, adj_mat))
+            cur_val = _eval(p_arr)
+            if cur_val > best_val:
+                best_val = cur_val
+                best_p = p_arr.detach().clone()
+                if z_is_tensor:
+                    best_z = z_param.detach().clone()
 
-    return p_arr.detach() if a == 0 else p0
+    # Restore the routing tensor matching the returned best-P (multi-message only),
+    # so the downstream final evaluation scores a consistent (P, Z) pair.
+    if z_is_tensor and best_z is not None:
+        with torch.no_grad():
+            z_param.copy_(best_z)
+
+    return best_p
 
 
 def evaluate_centralized_adam(
@@ -78,6 +150,10 @@ def evaluate_centralized_adam(
     lr: float = 0.1,
     num_iterations: int = 30,
     problem: str = "single",  # "single", "multicast", "multi", "converge", or "multiunicast"
+    reduce: str = "fair",     # K>1 message reduction: "fair"=eq10 min | "sum"/"mean" throughput
+    return_aux: bool = False,    # If True, also return Z/paths metadata for diagnostics.
+    warm_start=None,             # Optional per-sample GNN (P, Z) warm-start (multi-message only).
+    lr_grid=None,                # Optional list of LRs; each init is run at every LR and the best kept.
 ):
     """
     Evaluate centralized ADAM-based power allocation over a dataset for different
@@ -112,6 +188,20 @@ def evaluate_centralized_adam(
         lr (float):
             Learning rate for the AdamW optimizer.
 
+        warm_start (list | None):
+            Per-sample GNN allocation used as an ADDITIONAL initialization for the
+            multi-message optimizer, aligned with loader order. Each entry is
+            `(P_gnn, Z_gnn)` (or `None`). The optimizer is run from BOTH the greedy
+            init and the GNN init and the best iterate (scored at tau=0) is kept, so
+            the result is >= max(greedy, GNN) by construction. This restores the
+            optimizer as a valid upper reference where a free/dense-Z start otherwise
+            left it stuck near greedy at high SNR. Ignored for single/multicast.
+
+        lr_grid (list | None):
+            Optional set of learning rates. When given, every initialization is
+            optimized at each LR and the best result is kept (a coarse line search;
+            expensive but the benchmark is not real-time). None -> single `lr`.
+
         num_iterations (int):
             Number of gradient-descent iterations in `classic_opt`.
 
@@ -134,6 +224,7 @@ def evaluate_centralized_adam(
     """
     rate_results = []
     p_opt_results = []
+    aux_results = []
 
     sigma_arr = None
     if isinstance(noise_std, list):
@@ -146,6 +237,10 @@ def evaluate_centralized_adam(
         links = data.links_matrix        # [B, n, n]
         device = links.device
         n = adj.shape[0]
+        # Diagnostics metadata. Reset per sample so previous multi-message Z never leaks.
+        Z = None
+        Z0 = None          # greedy/adjacency Z init tensor (multi-message branches set it)
+        paths_k = None
 
         # ----- noise -----
         if sigma_arr is not None:
@@ -173,19 +268,28 @@ def evaluate_centralized_adam(
         # ----- problem-specific structures + p_arr shape + objective wrapper -----
         if problem == "single":
             # Single Tx→Rx
-            paths = find_all_paths(adj.cpu(), tx_raw, rx_raw)
-            paths = paths_to_tensor(paths, device)
+            paths_py = find_all_paths(adj.cpu(), tx_raw, rx_raw)
+            paths = paths_to_tensor(paths_py, device)
 
-            # Initialize P: [B, n, n]
-            p0 = torch.stack(
-                [
-                    create_normalized_tensor(
-                        n, n, mask=adj, device=device
-                    )
-                    for _ in range(B)
-                ],
-                dim=0,
-            )  # [B, n, n]
+            # Warm-start from the greedy (shortest-path, all-bands) allocation so the
+            # optimizer starts at a strong, concentrated feasible point rather than a
+            # dense random one it must sparsify against self-interference. Combined
+            # with best-iterate return in classic_opt, this makes the optimizer >=
+            # greedy by construction (it can only improve on its starting point).
+            valid_paths = [pp for pp in paths_py if len(pp) >= 2]
+            if valid_paths:
+                lengths = [len(pp) - 1 for pp in valid_paths]
+                min_len = min(lengths)
+                shortest = [pp for pp, L in zip(valid_paths, lengths) if L == min_len]
+                chosen_path = random.choice(shortest)
+                p0 = normalize_power(
+                    _build_P_from_path_single(links, chosen_path), adj
+                ).to(device)  # [B, n, n]
+            else:
+                p0 = torch.stack(
+                    [create_normalized_tensor(n, n, mask=adj, device=device) for _ in range(B)],
+                    dim=0,
+                )  # [B, n, n]
 
             objective_fn = objective_single_wrapper
             objective_kwargs_train = dict(
@@ -261,27 +365,31 @@ def evaluate_centralized_adam(
             K = len(rx_list)
 
             paths_k = []
+            paths_k_raw = []
             for rx_k in rx_list:
-                paths_k_k = find_all_paths(adj.cpu(), tx_raw, int(rx_k))
-                paths_k_k = paths_to_tensor(paths_k_k, device)
-                paths_k.append(paths_k_k)
+                raw_k = find_all_paths(adj.cpu(), tx_raw, int(rx_k))
+                paths_k_raw.append(raw_k)
+                paths_k.append(paths_to_tensor(raw_k, device))
 
-            # Initialize P: [B, K, n, n]
-            p0 = torch.stack(
-                [
-                    torch.stack(
-                        [
-                            create_normalized_tensor(
-                                n, n, mask=adj, device=device
-                            )
-                            for _ in range(K)
-                        ],
-                        dim=0,
-                    )
-                    for _ in range(B)
-                ],
-                dim=0,
-            )  # [B, K, n, n]
+            # Warm-start P from the greedy (shortest-path per commodity, all-bands)
+            # allocation so the optimizer begins concentrated rather than dense
+            # (mirrors Fix A for the single branch). Best-iterate return in
+            # classic_opt then guarantees the result is >= this greedy start.
+            if any(len(r) > 0 for r in paths_k_raw):
+                p0 = normalize_power(
+                    _build_P_from_paths_multi(links, paths_k_raw, K), adj
+                ).to(device)  # [B, K, n, n]
+            else:
+                p0 = torch.stack(
+                    [
+                        torch.stack(
+                            [create_normalized_tensor(n, n, mask=adj, device=device) for _ in range(K)],
+                            dim=0,
+                        )
+                        for _ in range(B)
+                    ],
+                    dim=0,
+                )  # [B, K, n, n]
 
             # Initialize Z: [B, K, n, n]
             Z0 = (
@@ -300,6 +408,7 @@ def evaluate_centralized_adam(
                 B=B,
                 adj_mat=adj,
                 Z=Z,
+                reduce=reduce,
                 tau_min=10,
                 tau_max=10,
                 per_band=False,
@@ -313,6 +422,7 @@ def evaluate_centralized_adam(
                 B=B,
                 adj_mat=adj,
                 Z=Z,
+                reduce=reduce,
                 tau_min=0,
                 tau_max=0,
                 per_band=False,
@@ -334,27 +444,31 @@ def evaluate_centralized_adam(
             K = len(tx_list)
 
             paths_k = []
+            paths_k_raw = []
             for tx_k in tx_list:
-                paths_k_k = find_all_paths(adj.cpu(), int(tx_k), rx_scalar)
-                paths_k_k = paths_to_tensor(paths_k_k, device)
-                paths_k.append(paths_k_k)
+                raw_k = find_all_paths(adj.cpu(), int(tx_k), rx_scalar)
+                paths_k_raw.append(raw_k)
+                paths_k.append(paths_to_tensor(raw_k, device))
 
-            # Initialize P: [B, K, n, n]
-            p0 = torch.stack(
-                [
-                    torch.stack(
-                        [
-                            create_normalized_tensor(
-                                n, n, mask=adj, device=device
-                            )
-                            for _ in range(K)
-                        ],
-                        dim=0,
-                    )
-                    for _ in range(B)
-                ],
-                dim=0,
-            )  # [B, K, n, n]
+            # Warm-start P from the greedy (shortest-path per commodity, all-bands)
+            # allocation so the optimizer begins concentrated rather than dense
+            # (mirrors Fix A for the single branch). Best-iterate return in
+            # classic_opt then guarantees the result is >= this greedy start.
+            if any(len(r) > 0 for r in paths_k_raw):
+                p0 = normalize_power(
+                    _build_P_from_paths_multi(links, paths_k_raw, K), adj
+                ).to(device)  # [B, K, n, n]
+            else:
+                p0 = torch.stack(
+                    [
+                        torch.stack(
+                            [create_normalized_tensor(n, n, mask=adj, device=device) for _ in range(K)],
+                            dim=0,
+                        )
+                        for _ in range(B)
+                    ],
+                    dim=0,
+                )  # [B, K, n, n]
 
             # Initialize Z: [B, K, n, n]
             Z0 = (
@@ -373,6 +487,7 @@ def evaluate_centralized_adam(
                 B=B,
                 adj_mat=adj,
                 Z=Z,
+                reduce=reduce,
                 tau_min=10,
                 tau_max=10,
                 per_band=False,
@@ -386,6 +501,7 @@ def evaluate_centralized_adam(
                 B=B,
                 adj_mat=adj,
                 Z=Z,
+                reduce=reduce,
                 tau_min=0,
                 tau_max=0,
                 per_band=False,
@@ -408,27 +524,31 @@ def evaluate_centralized_adam(
             K = len(tx_list)
 
             paths_k = []
+            paths_k_raw = []
             for tx_k, rx_k in zip(tx_list, rx_list):
-                paths_k_k = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
-                paths_k_k = paths_to_tensor(paths_k_k, device)
-                paths_k.append(paths_k_k)
+                raw_k = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
+                paths_k_raw.append(raw_k)
+                paths_k.append(paths_to_tensor(raw_k, device))
 
-            # Initialize P: [B, K, n, n]
-            p0 = torch.stack(
-                [
-                    torch.stack(
-                        [
-                            create_normalized_tensor(
-                                n, n, mask=adj, device=device
-                            )
-                            for _ in range(K)
-                        ],
-                        dim=0,
-                    )
-                    for _ in range(B)
-                ],
-                dim=0,
-            )  # [B, K, n, n]
+            # Warm-start P from the greedy (shortest-path per commodity, all-bands)
+            # allocation so the optimizer begins concentrated rather than dense
+            # (mirrors Fix A for the single branch). Best-iterate return in
+            # classic_opt then guarantees the result is >= this greedy start.
+            if any(len(r) > 0 for r in paths_k_raw):
+                p0 = normalize_power(
+                    _build_P_from_paths_multi(links, paths_k_raw, K), adj
+                ).to(device)  # [B, K, n, n]
+            else:
+                p0 = torch.stack(
+                    [
+                        torch.stack(
+                            [create_normalized_tensor(n, n, mask=adj, device=device) for _ in range(K)],
+                            dim=0,
+                        )
+                        for _ in range(B)
+                    ],
+                    dim=0,
+                )  # [B, K, n, n]
 
             # Initialize Z: [B, K, n, n]
             Z0 = (
@@ -447,6 +567,7 @@ def evaluate_centralized_adam(
                 B=B,
                 adj_mat=adj,
                 Z=Z,
+                reduce=reduce,
                 tau_min=10,
                 tau_max=10,
                 per_band=False,
@@ -460,6 +581,7 @@ def evaluate_centralized_adam(
                 B=B,
                 adj_mat=adj,
                 Z=Z,
+                reduce=reduce,
                 tau_min=0,
                 tau_max=0,
                 per_band=False,
@@ -471,35 +593,75 @@ def evaluate_centralized_adam(
         else:
             raise ValueError(f"Unknown problem type: {problem}")
 
-        # ----- create optimizer (for multi-message problems optimize both P and Z) -----
-        p_arr = nn.Parameter(p0, requires_grad=True)
-        if problem in {"multi", "converge", "multiunicast"}:
-            optimizer = optim.AdamW([p_arr, Z], lr=lr)
-        else:
-            optimizer = optim.AdamW([p_arr], lr=lr)
+        # ----- optimize from one or more initializations, keep the best -----
+        is_multi = problem in {"multi", "converge", "multiunicast"}
 
-        # ----- run centralized optimization loop -----
-        p_opt = classic_opt(
-            num_iterations=num_iterations,
-            optimizer=optimizer,
-            adj_mat=adj,
-            links_mat=links,
-            p_arr=p_arr,
-            sigma_noise=sigma,
-            objective_fn=objective_fn,
-            objective_kwargs=objective_kwargs_train,
-        )
-        p_opt_results.append(p_opt.detach())
+        # The greedy/adjacency init is always available. For multi-message problems, add
+        # the GNN allocation as a second init when provided. classic_opt returns the best
+        # iterate (scored at tau=0), so optimizing from both and keeping the best guarantees
+        # the optimizer >= max(greedy, GNN); this removes the high-SNR collapse where a free
+        # dense-Z start left the optimizer stuck near greedy while the GNN found far better
+        # multi-band routes. (single/multicast keep the original single greedy init.)
+        inits = [(p0, Z0)]
+        if is_multi and warm_start is not None and k_batch < len(warm_start):
+            ws = warm_start[k_batch]
+            if ws is not None:
+                P_ws, Z_ws = ws if isinstance(ws, (tuple, list)) else (ws, None)
+                if isinstance(P_ws, torch.Tensor) and tuple(P_ws.shape) == tuple(p0.shape):
+                    P_ws = normalize_power(P_ws.to(device).float(), adj)
+                    if (isinstance(Z_ws, torch.Tensor) and isinstance(Z0, torch.Tensor)
+                            and tuple(Z_ws.shape) == tuple(Z0.shape)):
+                        Z_ws = Z_ws.to(device).float().clamp(0, 1)
+                    else:
+                        Z_ws = Z0.clone() if isinstance(Z0, torch.Tensor) else None
+                    inits.append((P_ws, Z_ws))
 
-        # ----- evaluate final objective (positive, not negated) -----
-        rate = objective_fn(
-            links_mat=links,
-            P=p_opt,
-            sigma_noise=sigma,
-            **objective_kwargs_eval,
-        ).item()
-        rate_results.append(rate)
+        lrs = list(lr_grid) if lr_grid else [lr]
 
+        def _optimize_from(p_init, z_init, lr_used):
+            p_arr = nn.Parameter(p_init.clone().to(device), requires_grad=True)
+            if is_multi:
+                z_arr = nn.Parameter(z_init.clone().to(device), requires_grad=True)
+                objective_kwargs_train["Z"] = z_arr
+                objective_kwargs_eval["Z"] = z_arr
+                opt = optim.AdamW([p_arr, z_arr], lr=lr_used)
+            else:
+                z_arr = None
+                opt = optim.AdamW([p_arr], lr=lr_used)
+            p_star = classic_opt(
+                num_iterations=num_iterations,
+                optimizer=opt,
+                adj_mat=adj,
+                links_mat=links,
+                p_arr=p_arr,
+                sigma_noise=sigma,
+                objective_fn=objective_fn,
+                objective_kwargs=objective_kwargs_train,
+                objective_kwargs_eval=objective_kwargs_eval,
+            )
+            r_star = objective_fn(
+                links_mat=links, P=p_star, sigma_noise=sigma, **objective_kwargs_eval
+            ).item()
+            return p_star.detach(), (z_arr.detach().clone() if z_arr is not None else None), r_star
+
+        best_p, best_Z, best_rate = None, None, float("-inf")
+        for (p_init, z_init) in inits:
+            for lr_used in lrs:
+                p_cand, z_cand, r_cand = _optimize_from(p_init, z_init, lr_used)
+                if r_cand > best_rate:
+                    best_rate, best_p, best_Z = r_cand, p_cand, z_cand
+
+        p_opt_results.append(best_p)
+        rate_results.append(best_rate)
+
+        if return_aux:
+            aux_results.append({
+                "Z": best_Z,
+                "paths_k": paths_k,
+            })
+
+    if return_aux:
+        return rate_results, p_opt_results, aux_results
     return rate_results, p_opt_results
 
 
@@ -510,9 +672,17 @@ def evaluate_ffn(
     loader,
     sigma_noise,
     problem="single",
+    reduce="fair",
 ):
     """
     Evaluate a trained FFN model.
+
+    Estimated CSI is handled the same way as for the GNN in evaluate_across_snr: the
+    caller passes a loader whose links_matrix is already the estimate H_hat (built from an
+    EstimatedCSIDataset). The FFN forwards AND scores on the loader's CSI, so passing an
+    estimated loader mirrors passing the GNN an estimated dataset -- both plan and are
+    scored on the same CSI, keeping the comparison consistent. No separate estimate hook is
+    needed here (it would make the FFN score on truth while the GNN scores on the estimate).
 
     Args
     ----
@@ -520,7 +690,7 @@ def evaluate_ffn(
         Trained FFN model.
 
     loader : DataLoader
-        Evaluation dataset.
+        Evaluation dataset (true OR estimated CSI, chosen by the caller).
 
     sigma_noise : float
         Noise std (σ).
@@ -538,7 +708,7 @@ def evaluate_ffn(
     """
 
     model.eval()
-    objective_fn = select_ffn_objective(problem)
+    objective_fn = select_ffn_objective(problem, reduce=reduce)
     rate_results = []
     p_results = []
 
@@ -549,8 +719,8 @@ def evaluate_ffn(
         batch = move_batch_to_device(batch, device)
         h, adj, sigma, tx, rx = unpack_batch(batch)
 
-        # FFN prediction
-        p_raw = model(h).squeeze(0)
+        # FFN prediction (condition on the SAME sigma used to score, when noise-aware)
+        p_raw = model(h, sigma=sigma_noise).squeeze(0)
 
         # Projection
         p = normalize_power(p_raw, adj)
@@ -575,6 +745,8 @@ def compute_centralized_best_single_channel_rate(
     dataset,
     problem: str = "single",          # "single", "multicast", "multi", "converge", "multiunicast"
     sigma_noise=None,
+    paths_cache=None,                 # optional {(kind,idx,...): result} memo across SNR
+    reduce: str = "fair",             # K>1 message reduction: "fair"=eq10 min | "sum"/"mean"
 ):
     """
     Compute a bottleneck-based lower bound for each graph in the dataset.
@@ -606,7 +778,7 @@ def compute_centralized_best_single_channel_rate(
     lower_bounds = []
     p_min = []
 
-    for data in dataset:
+    for idx, data in enumerate(dataset):
         adj   = data.adj_matrix           # [n, n]
         links = data.links_matrix         # [B, n, n] (complex)
         B     = data.B if hasattr(data, "B") else links.shape[0]
@@ -628,18 +800,18 @@ def compute_centralized_best_single_channel_rate(
         # 1) SINGLE-UNICAST: bottleneck baseline
         # ------------------------------------------------------------------
         if problem == "single":
-            paths = find_all_paths(adj, tx, rx)
+            paths = _cached_all_paths(paths_cache, idx, adj, tx, rx)
             if not paths:
                 lower_bounds.append(0.0)
                 p_min.append(torch.zeros_like(links))
                 continue
 
-            h_band_vals   = []
-            idx_band_best = []
+            h_band_vals    = []
+            path_band_best = []   # per band: (b, edge_list) of that band's widest path
 
             for b in range(B):
-                band_path_mins = []
-                band_path_idx  = []
+                band_path_mins  = []
+                band_path_edges = []
 
                 for path in paths:
                     if len(path) < 2:
@@ -654,21 +826,17 @@ def compute_centralized_best_single_channel_rate(
                     if gains.numel() == 0:
                         continue
 
-                    min_val, argmin = gains.min(dim=0)
-                    min_val = float(min_val.item())
-                    i_min, j_min = edge_list[argmin.item()]
-
-                    band_path_mins.append(min_val)
-                    band_path_idx.append((b, i_min, j_min))
+                    band_path_mins.append(float(gains.min().item()))
+                    band_path_edges.append((b, edge_list))
 
                 if band_path_mins:
                     h_b = max(band_path_mins)
                     best_idx = band_path_mins.index(h_b)
                     h_band_vals.append(h_b)
-                    idx_band_best.append(band_path_idx[best_idx])
+                    path_band_best.append(band_path_edges[best_idx])
                 else:
                     h_band_vals.append(float("-inf"))
-                    idx_band_best.append(None)
+                    path_band_best.append(None)
 
             if all(v == float("-inf") for v in h_band_vals):
                 lower_bounds.append(0.0)
@@ -676,11 +844,17 @@ def compute_centralized_best_single_channel_rate(
                 continue
 
             h_best = max(h_band_vals)
-
-            p = torch.zeros_like(links)
             best_band_idx = h_band_vals.index(h_best)
-            b_best, i_best, j_best = idx_band_best[best_band_idx]
-            p[b_best, i_best, j_best] = 1.0
+            b_best, edge_list_best = path_band_best[best_band_idx]
+
+            # Power the *entire* widest path (all its edges) on the chosen band,
+            # matching the decentralized widest-path benchmark. Powering only the
+            # single bottleneck edge (previous behavior) scored 0 on every multi-hop
+            # path once ignore_zero_edges=False, which made decentralized widest-path
+            # beat centralized. Score over the full candidate-path set.
+            p = torch.zeros_like(links)
+            for (u, v) in edge_list_best:
+                p[b_best, u, v] = 1.0
             p_min.append(p)
 
             paths_tensor = paths_to_tensor(paths, adj.device)
@@ -690,9 +864,10 @@ def compute_centralized_best_single_channel_rate(
                 sigma=sigma,
                 paths_tensor=paths_tensor,
                 B=B,
-                tau=0.0,
+                tau_min=0.0,
+                tau_max=0.0,
                 per_band=False,
-                ignore_zero_edges=True,
+                ignore_zero_edges=False,
                 power_threshold=1e-8,
             )
             lower_bounds.append(float(rate.item()))
@@ -704,7 +879,7 @@ def compute_centralized_best_single_channel_rate(
         if problem == "multicast":
             rx_list = list(rx) if isinstance(rx, (list, tuple)) else [rx]
 
-            subgraphs = find_multicast_subgraphs(adj, tx, rx_list)
+            subgraphs = _cached_subgraphs(paths_cache, idx, adj, tx, rx_list)
             if (subgraphs is None) or (len(subgraphs) == 0):
                 lower_bounds.append(0.0)
                 p_min.append(torch.zeros_like(links))
@@ -750,8 +925,10 @@ def compute_centralized_best_single_channel_rate(
 
             p[best_band, rows, cols] = 1.0
 
-            subgraphs_per_band = [[] for _ in range(B)]
-            subgraphs_per_band[best_band] = [best_S]
+            # Score over the full candidate-subgraph set on every band
+            # (apples-to-apples with the GNN/optimizer); power stays on the
+            # chosen best subgraph/band only.
+            subgraphs_per_band = [subgraphs for _ in range(B)]
 
             rate = objective_multicast(
                 h=links,
@@ -763,7 +940,7 @@ def compute_centralized_best_single_channel_rate(
                 tau_min=0.0,
                 tau_max=0.0,
                 per_band=False,
-                ignore_zero_edges=True,
+                ignore_zero_edges=False,
                 power_threshold=1e-8,
             )
 
@@ -811,7 +988,7 @@ def compute_centralized_best_single_channel_rate(
             # Precompute all paths for each message
             paths_k_list = []
             for tx_k, rx_k in zip(tx_list, rx_list):
-                paths_k = find_all_paths(adj, int(tx_k), int(rx_k))
+                paths_k = _cached_all_paths(paths_cache, idx, adj, int(tx_k), int(rx_k))
                 if not paths_k:
                     paths_k_list.append(None)
                 else:
@@ -889,15 +1066,15 @@ def compute_centralized_best_single_channel_rate(
                 paths_k=paths_k_list,
                 tau_min=0.0,
                 tau_max=0.0,
-                reduce="mean",
+                reduce=reduce,
                 per_band=False,
                 outage_as_neg_inf=False,
-                ignore_zero_edges=True,
+                ignore_zero_edges=False,
                 power_threshold=1e-8,
             )
 
             lower_bounds.append(float(rate.item()))
-            p_min.append(p_multi.sum(dim=1))   # [B, n, n]
+            p_min.append((p_multi.detach(), z_multi.detach()))   # keep [B,K,n,n] + Z for diagnostics
             continue
 
         # ------------------------------------------------------------------
@@ -1093,6 +1270,8 @@ def compute_decentralized_best_single_channel_rate(
     sigma_noise=None,
     max_iters=None,
     eps=1e-12,
+    paths_cache=None,                 # optional memo across SNR (topology-only)
+    reduce: str = "fair",             # K>1 message reduction: "fair"=eq10 min | "sum"/"mean"
 ):
     """
     Decentralized Best Single Channel / widest-path heuristic for all frameworks.
@@ -1139,7 +1318,7 @@ def compute_decentralized_best_single_channel_rate(
     p_store = []
     aux_store = []
 
-    for data in dataset:
+    for idx, data in enumerate(dataset):
         adj = data.adj_matrix
         links = data.links_matrix
         B = data.B if hasattr(data, "B") else links.shape[0]
@@ -1199,7 +1378,10 @@ def compute_decentralized_best_single_channel_rate(
             for u, v in zip(path[:-1], path[1:]):
                 p[b, u, v] = 1.0
 
-            paths_tensor = paths_to_tensor([path], device)
+            # Score over the full candidate-path set (apples-to-apples with the
+            # other benchmarks); power stays on the chosen widest path only.
+            all_paths = _cached_all_paths(paths_cache, idx, adj.cpu(), int(data.tx), int(data.rx))
+            paths_tensor = paths_to_tensor(all_paths, device)
 
             rate = calc_sum_rate(
                 h_arr=links,
@@ -1207,9 +1389,10 @@ def compute_decentralized_best_single_channel_rate(
                 sigma=sigma,
                 paths_tensor=paths_tensor,
                 B=B,
-                tau=0.0,
+                tau_min=0.0,
+                tau_max=0.0,
                 per_band=False,
-                ignore_zero_edges=True,
+                ignore_zero_edges=False,
                 power_threshold=1e-8,
             )
 
@@ -1301,6 +1484,11 @@ def compute_decentralized_best_single_channel_rate(
                 continue
 
             # Activate all edges of the selected multicast subgraph on the best single band.
+            # find_multicast_subgraphs returns UNDIRECTED masks scored on every edge, so power BOTH
+            # directions (like centralized-widest). Forward-only powering left the candidates' reverse
+            # edges unpowered -> bottleneck 0 -> rate 0 (the curve vanished on the log plot).
+            best_S = ((best_S + best_S.t()) > 0).to(best_S.dtype)
+
             p = torch.zeros_like(links)
 
             edge_idx = best_S.nonzero(as_tuple=False)
@@ -1309,8 +1497,10 @@ def compute_decentralized_best_single_channel_rate(
 
             p[best_band, rows, cols] = 1.0
 
-            subgraphs_per_band = [[] for _ in range(B)]
-            subgraphs_per_band[best_band] = [best_S]
+            # Score over the full candidate-subgraph set on every band (apples-to-apples with the
+            # GNN/optimizer); power stays on the selected widest-path subgraph/band only.
+            all_subgraphs = _cached_subgraphs(paths_cache, idx, adj.cpu(), tx, rx_list)
+            subgraphs_per_band = [all_subgraphs for _ in range(B)]
 
             rate = objective_multicast(
                 h=links,
@@ -1322,7 +1512,7 @@ def compute_decentralized_best_single_channel_rate(
                 tau_max=0.0,
                 per_band=False,
                 eps=1e-12,
-                ignore_zero_edges=True,
+                ignore_zero_edges=False,
                 power_threshold=1e-8,
             )
 
@@ -1349,8 +1539,17 @@ def compute_decentralized_best_single_channel_rate(
             has_any_path = False
 
             for k, path in enumerate(selected_paths):
+                # Score each commodity over its full candidate-path set
+                # (apples-to-apples with greedy/optimizer); power stays on the
+                # chosen widest path only.
+                all_paths_k = _cached_all_paths(paths_cache, idx, adj.cpu(), int(tx_list[k]), int(rx_list[k]))
+                paths_k.append(
+                    paths_to_tensor(all_paths_k, device)
+                    if all_paths_k
+                    else torch.empty((0, 0), device=device, dtype=torch.long)
+                )
+
                 if path is None:
-                    paths_k.append(torch.empty((0, 0), device=device, dtype=torch.long))
                     continue
 
                 has_any_path = True
@@ -1359,8 +1558,6 @@ def compute_decentralized_best_single_channel_rate(
                 for u, v in zip(path[:-1], path[1:]):
                     p[b, k, u, v] = 1.0 / max(K ** 0.5, 1)
                     z[b, k, u, v] = 1.0
-
-                paths_k.append(paths_to_tensor([path], device))
 
             if not has_any_path:
                 rates.append(0.0)
@@ -1383,10 +1580,10 @@ def compute_decentralized_best_single_channel_rate(
                 paths_k=paths_k,
                 tau_min=0.0,
                 tau_max=0.0,
-                reduce="mean",
+                reduce=reduce,
                 per_band=False,
                 outage_as_neg_inf=False,
-                ignore_zero_edges=True,
+                ignore_zero_edges=False,
                 power_threshold=1e-8,
             )
 
@@ -1408,7 +1605,7 @@ def compute_decentralized_best_single_channel_rate(
 
 # ============================== Decentralized Equal Power =============================================================
 
-def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
+def compute_equal_power_bound(dataset, sigma_noise=False, problem="single", paths_cache=None, reduce="fair"):
     """
     Compute the equal-power baseline rate depending on the problem type:
 
@@ -1423,7 +1620,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
     rate_bounds = []
     p_store = []  # keep the actual equal-power P (and Z for multi-message problems)
 
-    for data in dataset:
+    for idx, data in enumerate(dataset):
         device = data.links_matrix.device
         data = data.to(device)
 
@@ -1443,7 +1640,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
         # SINGLE
         # --------------------------
         if problem == "single":
-            paths = find_all_paths(adj.cpu(), data.tx, data.rx)
+            paths = _cached_all_paths(paths_cache, idx, adj.cpu(), data.tx, data.rx)
             if not paths:
                 rate_bounds.append(0.0)
                 continue
@@ -1461,7 +1658,8 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
                 sigma=sigma_t,
                 paths_tensor=paths,
                 B=B,
-                tau=0.0,
+                tau_min=0.0,
+                tau_max=0.0,
                 eps=1e-12,
                 per_band=False
             )
@@ -1479,7 +1677,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             if isinstance(rx_list, (list, tuple)) and len(rx_list) == 1 and isinstance(rx_list[0], (list, tuple)):
                 rx_list = rx_list[0]
 
-            subgraphs = find_multicast_subgraphs(adj.cpu(), data.tx, rx_list)
+            subgraphs = _cached_subgraphs(paths_cache, idx, adj.cpu(), data.tx, rx_list)
             if (subgraphs is None) or (len(subgraphs) == 0):
                 rate_bounds.append(0.0)
                 continue
@@ -1548,7 +1746,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             paths_k = []
             has_path = False
             for tx_k, rx_k in zip(tx_list, rx_list):
-                pk = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
+                pk = _cached_all_paths(paths_cache, idx, adj.cpu(), int(tx_k), int(rx_k))
                 paths_k.append(
                     paths_to_tensor(pk, device) if pk else
                     torch.empty((0, 0), device=device, dtype=torch.long)
@@ -1569,7 +1767,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
             P = normalize_power(P, adj).to(device)
 
             # routing matrix initialized to binary adjacency mask
-            Z = Z = (P > 1e-8).float().to(device)
+            Z = (P > 1e-8).float().to(device)
 
             rate = objective_multicommodity(
                 h=h,
@@ -1580,7 +1778,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
                 paths_k=paths_k,
                 tau_min=0.0,
                 tau_max=0.0,
-                reduce="mean",
+                reduce=reduce,
                 per_band=False,
                 outage_as_neg_inf=False,
             )
@@ -1596,7 +1794,7 @@ def compute_equal_power_bound(dataset, sigma_noise=False, problem="single"):
 
 # ======================================= Centralized Greedy Power Allocation ==========================================
 
-def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="single"):
+def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="single", paths_cache=None, reduce="fair"):
     """
     Greedy-power benchmark:
 
@@ -1630,7 +1828,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
     rate_bounds = []
     p_store = []
 
-    for data in dataset:
+    for idx, data in enumerate(dataset):
         device = data.links_matrix.device
         data = data.to(device)
 
@@ -1646,7 +1844,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
         # SINGLE
         # --------------------------
         if problem == "single":
-            all_paths = find_all_paths(adj.cpu(), data.tx, data.rx)
+            all_paths = _cached_all_paths(paths_cache, idx, adj.cpu(), data.tx, data.rx)
             if not all_paths:
                 rate_bounds.append(0.0)
                 continue
@@ -1659,15 +1857,15 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
             P = _build_P_from_path_single(h, chosen_path)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
 
-            # paths_tensor = paths_to_tensor(all_paths, device)
-            paths_tensor = paths_to_tensor([chosen_path], device)
+            paths_tensor = paths_to_tensor(all_paths, device)
             rate = calc_sum_rate(
                 h_arr=h,
                 p_arr=P,
                 sigma=sigma_t,
                 paths_tensor=paths_tensor,
                 B=B,
-                tau=0.0,
+                tau_min=0.0,
+                tau_max=0.0,
                 eps=1e-12,
                 per_band=False,
             )
@@ -1700,7 +1898,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
             valid = True
 
             for r in rx_list:
-                all_paths_r = find_all_paths(adj.cpu(), int(data.tx), int(r))
+                all_paths_r = _cached_all_paths(paths_cache, idx, adj.cpu(), int(data.tx), int(r))
                 if not all_paths_r:
                     valid = False
                     break
@@ -1715,7 +1913,16 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
                 continue
 
             best_sg = _paths_to_multicast_subgraph(paths, n, device)
-            subgraphs_per_band = [[best_sg] for _ in range(B)]
+            # find_multicast_subgraphs returns UNDIRECTED (bidirectional) masks, and objective_multicast
+            # scores EVERY edge in the candidate mask. So power BOTH directions of the chosen tree (as
+            # centralized-widest does). Powering only the forward path edges leaves the candidates'
+            # reverse edges unpowered -> bottleneck 0 -> rate 0 (the curve vanished on the log plot).
+            best_sg = ((best_sg + best_sg.t()) > 0).to(best_sg.dtype)
+
+            # Score over the full candidate-subgraph set (apples-to-apples with the GNN/optimizer);
+            # power stays on the chosen subgraph only.
+            all_subgraphs = _cached_subgraphs(paths_cache, idx, adj.cpu(), int(data.tx), rx_list)
+            subgraphs_per_band = [all_subgraphs for _ in range(B)]
 
             P = _build_P_from_multicast_subgraph(h, adj, best_sg)   # [B,n,n]
             P = normalize_power(P, adj).to(device)
@@ -1729,7 +1936,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
                 tau_min=0.0,
                 tau_max=0.0,
                 per_band=False,
-                ignore_zero_edges=True,
+                ignore_zero_edges=False,
                 power_threshold=1e-10,
                 eps=1e-12,
             )
@@ -1780,7 +1987,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
             paths_k_lists = []
             has_path = False
             for tx_k, rx_k in zip(tx_list, rx_list):
-                pk = find_all_paths(adj.cpu(), int(tx_k), int(rx_k))
+                pk = _cached_all_paths(paths_cache, idx, adj.cpu(), int(tx_k), int(rx_k))
                 paths_k_lists.append(pk if pk else [])
                 if pk:
                     has_path = True
@@ -1813,7 +2020,7 @@ def compute_centralized_greedy_power_rate(dataset, sigma_noise=False, problem="s
                 paths_k=paths_k_tensors,
                 tau_min=0.0,
                 tau_max=0.0,
-                reduce="mean",
+                reduce=reduce,
                 per_band=False,
                 outage_as_neg_inf=False,
             )
@@ -1832,6 +2039,8 @@ def compute_decentralized_greedy_power_rate(
     sigma_noise=False,
     problem="single",
     max_iters=None,
+    paths_cache=None,                 # optional memo across SNR (topology-only)
+    reduce: str = "fair",             # K>1 message reduction: "fair"=eq10 min | "sum"/"mean"
 ):
     """
     Distributed greedy/shortest-path benchmark.
@@ -1866,7 +2075,7 @@ def compute_decentralized_greedy_power_rate(
     rate_bounds = []
     p_store = []
 
-    for data in dataset:
+    for idx, data in enumerate(dataset):
         device = data.links_matrix.device
         data = data.to(device)
 
@@ -1905,14 +2114,17 @@ def compute_decentralized_greedy_power_rate(
             P = _build_P_from_path_single(h, chosen_path)
             P = normalize_power(P, adj).to(device)
 
-            paths_tensor = paths_to_tensor([chosen_path], device)
+            all_paths = _cached_all_paths(paths_cache, idx, adj.cpu(), int(data.tx), int(data.rx))
+            paths_tensor = paths_to_tensor(all_paths, device)
+
             rate = calc_sum_rate(
                 h_arr=h,
                 p_arr=P,
                 sigma=sigma_t,
                 paths_tensor=paths_tensor,
                 B=B,
-                tau=0.0,
+                tau_min=0.0,
+                tau_max=0.0,
                 eps=1e-12,
                 per_band=False,
             )
@@ -1945,16 +2157,21 @@ def compute_decentralized_greedy_power_rate(
                 p_store.append(torch.zeros_like(h))
                 continue
 
-            S = _paths_to_multicast_subgraph(paths, n, device)
-
-            subgraphs_per_band = [[S] for _ in range(B)]
+            # Score over the full candidate-subgraph set (apples-to-apples with the GNN/optimizer);
+            # power stays on the chosen shortest paths only.
+            all_subgraphs = _cached_subgraphs(paths_cache, idx, adj.cpu(), tx, rx_list)
+            subgraphs_per_band = [all_subgraphs for _ in range(B)]
 
             P = torch.zeros(B, n, n, device=device)
             amp = 1.0 / (B ** 0.5)
 
+            # find_multicast_subgraphs returns UNDIRECTED masks scored on every edge, so power BOTH
+            # directions of each tree edge (forward-only powering left the candidates' reverse edges
+            # unpowered -> bottleneck 0 -> rate 0, so the curve vanished on the log plot).
             for path in paths:
                 for u, v in zip(path[:-1], path[1:]):
                     P[:, int(u), int(v)] = amp
+                    P[:, int(v), int(u)] = amp
 
             P = normalize_power(P, adj).to(device)
 
@@ -1990,6 +2207,7 @@ def compute_decentralized_greedy_power_rate(
                 distributed_shortest_path(adj, tx, r, max_iters=max_iters)
                 for r in rx_list
             ]
+            endpoints_k = [(tx, r) for r in rx_list]
             K = len(rx_list)
 
         # --------------------------
@@ -2008,6 +2226,7 @@ def compute_decentralized_greedy_power_rate(
                 distributed_shortest_path(adj, t, rx, max_iters=max_iters)
                 for t in tx_list
             ]
+            endpoints_k = [(t, rx) for t in tx_list]
             K = len(tx_list)
 
         # --------------------------
@@ -2033,6 +2252,7 @@ def compute_decentralized_greedy_power_rate(
                 distributed_shortest_path(adj, t, r, max_iters=max_iters)
                 for t, r in zip(tx_list, rx_list)
             ]
+            endpoints_k = list(zip(tx_list, rx_list))
             K = len(tx_list)
 
         else:
@@ -2052,9 +2272,9 @@ def compute_decentralized_greedy_power_rate(
             P = normalize_power(P, adj).to(device)
 
             paths_k_tensors = [
-                paths_to_tensor([path], device)
+                paths_to_tensor(_cached_all_paths(paths_cache, idx, adj.cpu(), int(s), int(t)), device)
                 if path is not None else torch.empty((0, 0), device=device, dtype=torch.long)
-                for path in paths_k
+                for path, (s, t) in zip(paths_k, endpoints_k)
             ]
 
             Z = (P > 1e-8).float().to(device)
@@ -2068,7 +2288,7 @@ def compute_decentralized_greedy_power_rate(
                 paths_k=paths_k_tensors,
                 tau_min=0.0,
                 tau_max=0.0,
-                reduce="mean",
+                reduce=reduce,
                 per_band=False,
                 outage_as_neg_inf=False,
             )
