@@ -190,7 +190,7 @@ $\mathbf f_{i\to j}=[\,\mathbf e^{(L/2)}_{i\to j}\Vert\mathbf x^{(L/2)}_i\Vert\m
    training and a **hard per-band argmax** at inference, projected onto edges:
 
 ```math
-Z_{b,k,i,j}=\sum_{m}\pi_{b,k,m}\,\mathbbm 1\{(i,j)\in p_{k,m}\},\qquad
+Z_{b,k,i,j}=\sum_{m}\pi_{b,k,m}\,\mathbf 1\{(i,j)\in p_{k,m}\},\qquad
 \pi_{b,k,m}=\frac{e^{a_{b,k,m}/\tau_r}}{\sum_{m'}e^{a_{b,k,m'}/\tau_r}}.
 ```
 
