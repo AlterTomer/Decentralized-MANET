@@ -19,10 +19,10 @@ from MANET_FFN.model import FFNPowerAllocator
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Single Tx-Rx\comp_unicast.ini",
+cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multicast\comp_multicast.ini",
            r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\comp_multicommodity.ini",
            r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multiunicast\comp_multiunicast.ini",
-           r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multicast\comp_multicast.ini"]
+           r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Single Tx-Rx\comp_unicast.ini"]
 
 for path in cfg_arr:
     # cfg_path = r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multiunicast\comp_multiunicast.ini"

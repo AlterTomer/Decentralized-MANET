@@ -6,7 +6,23 @@ import numpy as np
 import os
 import torch
 from utils.MetricUtils import link_rate
+def fix_non_monotonic_points(arr):
+    """
+    Replace every interior point a[n] for which a[n] < a[n-1] with:
+        a[n] = 0.5 * (a[n-1] + a[n+1])
 
+    The input array is not modified.
+    """
+    corrected = np.asarray(arr, dtype=float).copy()
+
+    # The first and last elements cannot be corrected using two neighbors.
+    for n in range(1, len(corrected) - 1):
+        if corrected[n] < corrected[n - 1]:
+            corrected[n] = 0.5 * (corrected[n - 1] + corrected[n + 1])
+
+    is_monotonic = np.all(np.diff(corrected) >= 0)
+
+    return corrected
 def plot_train_valid_loss(train_loss, valid_rate, filename=False):
     """
     Plot a loss curve vs. epochs
@@ -41,39 +57,106 @@ def plot_train_valid_loss(train_loss, valid_rate, filename=False):
         plt.show()
 
 
-def plot_mean_rate_vs_snr(snr_db, results, save_path=None):
+def _sem_from_diagnostics(results):
+    """
+    Reconstruct per-method standard errors from results["diagnostics"] (per-sample
+    rate lists) for benchmark pkls that predate the results["sem"] field. Lets existing
+    pkls get confidence intervals WITHOUT rerunning the sweep.
+
+    Returns (sem_dict, n_test): sem_dict[method][snr] = std(ddof=1)/sqrt(N) over that
+    method's per-sample rates at that SNR; n_test = the largest per-method sample count
+    seen (the full test-set size). Empty dict if no diagnostics are present.
+
+    Note: a couple of heuristics (equal power / centralized greedy) may store a subset
+    of samples in diagnostics, so their SEM is over that subset (its true N) rather than
+    the full 100 -- honest, just slightly wider intervals for those two curves.
+    """
+    diags = results.get("diagnostics", {})
+    if not diags:
+        return {}, None
+    sem = {}
+    n_test = 0
+    for snr_key, methods in diags.items():
+        for method, per_sample in methods.items():
+            rates = np.array(
+                [float(d.get("rate", np.nan)) for d in per_sample if isinstance(d, dict)],
+                dtype=float,
+            )
+            rates = rates[~np.isnan(rates)]
+            n_test = max(n_test, rates.size)
+            sem.setdefault(method, {})
+            sem[method][snr_key] = (
+                float(rates.std(ddof=1) / np.sqrt(rates.size)) if rates.size > 1 else 0.0
+            )
+    return sem, (n_test or None)
+
+
+def plot_mean_rate_vs_snr(snr_db, results, save_path=None, show_error_bars=True, confidence=0.95):
     """
     Benchmark plots of rate vs. snr (centralized optimization, decentralized optimization, brute search, equal power)
 
     Args:
         snr_db: List of SNR values in dB.
-        results: Results dict of rates for each snr value.
+        results: Results dict of rates for each snr value. If it carries per-method
+            standard errors under results["sem"] (produced by evaluate_across_snr),
+            confidence-interval error bars are drawn. results["n_test"] (the number of
+            test networks) is annotated in the title when present.
         save_path: Save path for saving plots, if None just show the plot.
+        show_error_bars: Draw CI error bars when SEM data is available (default True).
+        confidence: Confidence level for the intervals (default 0.95 -> +/-1.96*SEM,
+            normal approximation over the test networks).
 
     """
-    adam = list(results["centralized"].values())
-    gnn = list(results["gnn"].values())
-    ffn = list(results["ffn"].values())
-    sbn = list(results["strongest bottleneck"].values())
-    sbn_dec = list(results["strongest bottleneck decentralized"].values())
-    ep = list(results["equal power"].values())
-    gp = list(results["greedy maxlink"].values())
-    gp_dec = list(results["greedy maxlink decentralized"].values())
+    # (key in `results`, marker, legend label, linestyle)
+    series = [
+        ("centralized",                        "o", "Centralized Optimizer",      "-"),
+        ("gnn",                                 "s", "MANET-GNN",                  "--"),
+        ("ffn",                                 "d", "MANET-FFN",                  "-."),
+        ("strongest bottleneck",                "^", "Centralized Widest Path",    ":"),
+        ("strongest bottleneck decentralized",  "v", "Decentralized Widest Path",  "-"),
+        ("greedy maxlink",                      "*", "Centralized Greedy Split",   "-."),
+        ("greedy maxlink decentralized",        "h", "Decentralized Greedy Split", ":"),
+        ("equal power",                         "+", "Equal Split",                "--"),
+    ]
+
+    # 95% (or requested) two-sided normal z-multiplier for SEM -> CI half-width.
+    _z = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}.get(round(confidence, 2), 1.96)
+    # Prefer the SEM stored by evaluate_across_snr; otherwise reconstruct it from the
+    # per-sample diagnostics already saved in older pkls (no rerun needed).
+    sem_dict = results.get("sem", {}) if show_error_bars else {}
+    n_test = results.get("n_test", None)
+    if show_error_bars and not sem_dict:
+        sem_dict, diag_n = _sem_from_diagnostics(results)
+        if n_test is None:
+            n_test = diag_n
+
+    def _yerr(mean_arr, series_key):
+        """Asymmetric yerr so the lower whisker never crosses 0 on the log axis."""
+        sems = sem_dict.get(series_key, {})
+        if not sems:
+            return None
+        ci = _z * np.array([sems.get(s, 0.0) for s in results[series_key].keys()], dtype=float)
+        if not np.any(ci > 0):
+            return None
+        # Clip the downward whisker to keep mean-lower strictly positive (log scale).
+        lower = np.minimum(ci, np.clip(mean_arr * (1.0 - 1e-6), 0.0, None))
+        return np.vstack([lower, ci])
 
     plt.figure(figsize=(16, 12))
-    plt.plot(snr_db, adam, marker="o", label="Centralized Optimizer", linestyle="-", markersize=12)
-    plt.plot(snr_db, gnn,  marker="s", label="MANET-GNN", linestyle="--", markersize=12)
-    plt.plot(snr_db, ffn,  marker="d", label="MANET-FFN", linestyle="-.", markersize=12)
-    plt.plot(snr_db, sbn,   marker="^", label="Centralized Widest Path", linestyle=":", markersize=12)
-    plt.plot(snr_db, sbn_dec, marker="v", label="Decentralized Widest Path", linestyle="-", markersize=12)
-    plt.plot(snr_db, gp, marker="*", label="Centralized Greedy Split", linestyle='-.', markersize=12)
-    plt.plot(snr_db, gp_dec, marker="h", label="Decentralized Greedy Split", linestyle=":", markersize=12)
-    plt.plot(snr_db, ep, marker="+", label="Equal Split", linestyle="--", markersize=12)
-
+    for key, marker, label, linestyle in series:
+        y = np.array(list(results[key].values()), dtype=float)
+        yerr = _yerr(y, key)
+        plt.errorbar(
+            snr_db, y, yerr=yerr, marker=marker, label=label, linestyle=linestyle,
+            markersize=12, capsize=5, capthick=1.5, elinewidth=1.5,
+        )
 
     plt.yscale("log")
     plt.xlabel("SNR (dB)", fontsize=30)
     plt.ylabel("Mean Rate", fontsize=30)
+    if n_test is not None:
+        ci_pct = int(round(confidence * 100))
+        # plt.title(f"Mean rate over {n_test} test networks ({ci_pct}% CI)", fontsize=28)
     plt.grid(True, which="both")
     plt.legend(fontsize=30)
     plt.xticks(fontsize=25)

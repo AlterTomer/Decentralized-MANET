@@ -17,6 +17,7 @@ MANET-GNN is a decentralized learned optimization framework for power allocation
 * Multicast
 * Multicommodity
 * Convergecast
+* Multiunicast
 
 The method combines:
 
@@ -48,12 +49,13 @@ and demonstrated near-centralized performance across all communication framework
 
 A single formulation supporting:
 
-| Framework | Description    |
-| --------- | -------------- |
-| F1        | Unicast        |
-| F2        | Multicast      |
-| F3        | Multicommodity |
-| F4        | Convergecast   |
+| Framework | Description    | Config `mode`  |
+| --------- | -------------- | -------------- |
+| F1        | Unicast        | `single`       |
+| F2        | Multicast      | `multicast`    |
+| F3        | Multicommodity | `multi`        |
+| F4        | Convergecast   | `converge`     |
+| F5        | Multiunicast   | `multiunicast` |
 
 ---
 
@@ -166,7 +168,7 @@ Final outputs include:
 * Power allocation tensor
 * Commodity assignment masks
 
-The design follows the architecture described in Sections III-A and III-B of the paper. fileciteturn0file0L330-L365
+The design follows the architecture described in Sections III-A and III-B of the paper.
 
 ---
 
@@ -182,29 +184,45 @@ The training objective directly maximizes the end-to-end communication rate:
 
 The total loss combines:
 
-* Rate maximization
+* Rate maximization (max-min end-to-end throughput)
 * Monotonic improvement regularization
+* Edge-sparsity regularization (concentrates power on the active route to limit self-interference)
 
-Training setup from the paper:
+Training setup:
 
 * AdamW optimizer
 * Cosine learning-rate scheduling
 * Dropout regularization
 * Rayleigh and QuaDRiGa channels
-* SNR range: 0–20 dB
+* SNR range: 0–50 dB
 
 ---
 
 ## Benchmarks
 
-The repository includes comparisons against:
+The repository includes comparisons against the following baselines, evaluated by
+`scripts/Optimizer_vs_GNN.py` across the full SNR sweep:
 
-| Baseline              | Description                             |
-| --------------------- | --------------------------------------- |
-| Centralized Optimizer | AdamW optimization over the full MANET  |
-| Equal-Split           | Uniform power allocation                |
-| Greedy-Split          | Shortest-path-based heuristic           |
-| Best Single Channel   | Bottleneck-based single-band allocation |
+| Baseline                       | Description                                                        |
+| ------------------------------ | ----------------------------------------------------------------- |
+| Centralized Optimizer          | Direct Adam optimization over the full MANET (upper reference)     |
+| MANET-FFN                      | Topology-blind MLP baseline over flattened CSI                     |
+| Widest Path (centralized)      | Strongest-bottleneck route, single-band allocation                |
+| Widest Path (decentralized)    | Distributed strongest-bottleneck route                            |
+| Greedy Split (centralized)     | Shortest-path route, power split across all bands                 |
+| Greedy Split (decentralized)   | Distributed shortest-path greedy split                            |
+| Equal Split                    | Uniform power allocation                                          |
+
+All methods are scored through the identical rate objective (same routing candidate set and
+band aggregation), so learned and heuristic allocations are compared on equal footing.
+
+### Confidence intervals
+
+Rate-versus-SNR curves report the mean over a fixed set of random test networks together with
+**95% confidence intervals** (normal-approximation, `±1.96·SEM`). The benchmark stores per-network
+spread (`results["sem"]`) and the test-set size (`results["n_test"]`) alongside the means, and
+`plot_mean_rate_vs_snr` renders error bars for every method at every SNR. The test-set size is
+also annotated on the figure title, so the stability of small gaps between methods is explicit.
 
 ---
 
@@ -279,7 +297,7 @@ L: 2
 n: 10
 tx: 4
 rx: 1, 6, 7, 9
-SNR: 0, 4, 8, 12, 16, 20
+SNR: 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
 dropout: 0.2
 lr: 1e-3
 wd: 3e-5
@@ -340,6 +358,7 @@ The paper evaluates:
 * Multicast
 * Multicommodity
 * Convergecast
+* Multiunicast
 
 under:
 

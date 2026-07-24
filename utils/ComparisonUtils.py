@@ -1061,16 +1061,33 @@ def evaluate_across_snr(
     mean curves keep the original keys, so existing plotting code should continue to work.
     """
     device = next(model.parameters()).device
-    results = {
-        "gnn": {},
-        "ffn": {},
-        "centralized": {},
-        "strongest bottleneck": {},
-        "strongest bottleneck decentralized": {},
-        "equal power": {},
-        "greedy maxlink": {},
-        "greedy maxlink decentralized": {},
-    }
+    method_keys = [
+        "gnn",
+        "ffn",
+        "centralized",
+        "strongest bottleneck",
+        "strongest bottleneck decentralized",
+        "equal power",
+        "greedy maxlink",
+        "greedy maxlink decentralized",
+    ]
+    results = {k: {} for k in method_keys}
+    # Per-SNR standard error of the mean rate (std / sqrt(N)), same keys as the mean
+    # curves, so plotting code can draw confidence intervals. `n_test` is the number of
+    # test networks the means/SEMs are computed over (for the reviewer's stated N).
+    results["sem"] = {k: {} for k in method_keys}
+    results["n_test"] = len(dataset)
+
+    def _record(method_key, snr_key, per_sample_rates):
+        """Store the mean rate and its standard error for one method at one SNR."""
+        arr = np.asarray(list(per_sample_rates), dtype=float)
+        results[method_key][snr_key] = float(arr.mean()) if arr.size else 0.0
+        # ddof=1 sample std; SEM = std / sqrt(N). Undefined for N<2 -> 0.
+        if arr.size > 1:
+            results["sem"][method_key][snr_key] = float(arr.std(ddof=1) / np.sqrt(arr.size))
+        else:
+            results["sem"][method_key][snr_key] = 0.0
+
     if collect_diagnostics:
         results["diagnostics"] = {}
         results["diagnostics_summary"] = {}
@@ -1154,7 +1171,7 @@ def evaluate_across_snr(
                 else:
                     gnn_z_store.append(None)
                 gnn_rate_store.append(rate)
-            results["gnn"][snr_db] = float(np.mean(rates))
+            _record("gnn", snr_db, rates)
             if keep_raw_diag:
                 gnn_diags = []
                 for i, d in enumerate(dataset):
@@ -1175,9 +1192,10 @@ def evaluate_across_snr(
             ffn_rates, _ = evaluate_ffn(
                 ffn_model, ffn_loader, sigma_noise=sigma, problem=problem, reduce=reduce,
             )
-            results["ffn"][snr_db] = float(np.mean(ffn_rates)) if len(ffn_rates) else 0.0
+            _record("ffn", snr_db, ffn_rates if len(ffn_rates) else [0.0])
         else:
             results["ffn"][snr_db] = 0
+            results["sem"]["ffn"][snr_db] = 0.0
 
         # ==============================================
         # 3) Centralized ADAM benchmark
@@ -1203,7 +1221,7 @@ def evaluate_across_snr(
         else:
             adam_rates, adam_p = adam_out
             adam_aux = None
-        results["centralized"][snr_db] = float(np.mean(adam_rates))
+        _record("centralized", snr_db, adam_rates)
         if keep_raw_diag:
             snr_diags["centralized"] = _diagnose_method_store(
                 "centralized", dataset, adam_p, adam_aux, sigma, problem, reduce, B, device, diag_struct_cache,
@@ -1219,7 +1237,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
-        results["strongest bottleneck"][snr_db] = float(np.mean(bottleneck_rates))
+        _record("strongest bottleneck", snr_db, bottleneck_rates)
         if keep_raw_diag:
             snr_diags["strongest bottleneck"] = _diagnose_method_store(
                 "strongest bottleneck", dataset, bottleneck_store, None, sigma, problem, reduce, B, device,
@@ -1233,7 +1251,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
-        results["strongest bottleneck decentralized"][snr_db] = float(np.mean(bottleneck_rates_decentralized))
+        _record("strongest bottleneck decentralized", snr_db, bottleneck_rates_decentralized)
         if keep_raw_diag:
             snr_diags["strongest bottleneck decentralized"] = _diagnose_method_store(
                 "strongest bottleneck decentralized", dataset, bottleneck_dec_store, bottleneck_dec_aux, sigma, problem,
@@ -1249,7 +1267,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
-        results["equal power"][snr_db] = float(np.mean(rates_equal_power))
+        _record("equal power", snr_db, rates_equal_power)
         if keep_raw_diag:
             snr_diags["equal power"] = _diagnose_method_store(
                 "equal power", dataset, equal_store, None, sigma, problem, reduce, B, device, diag_struct_cache,
@@ -1265,7 +1283,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
-        results["greedy maxlink"][snr_db] = float(np.mean(rates_greedy))
+        _record("greedy maxlink", snr_db, rates_greedy)
         if keep_raw_diag:
             snr_diags["greedy maxlink"] = _diagnose_method_store(
                 "greedy maxlink", dataset, greedy_store, None, sigma, problem, reduce, B, device, diag_struct_cache,
@@ -1279,7 +1297,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
-        results["greedy maxlink decentralized"][snr_db] = float(np.mean(rates_greedy_decentralized))
+        _record("greedy maxlink decentralized", snr_db, rates_greedy_decentralized)
         if keep_raw_diag:
             snr_diags["greedy maxlink decentralized"] = _diagnose_method_store(
                 "greedy maxlink decentralized", dataset, greedy_dec_store, None, sigma, problem, reduce, B, device,
