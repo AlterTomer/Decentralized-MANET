@@ -17,7 +17,7 @@ MANET-GNN is a decentralized learned optimization framework for power allocation
 * Multicast
 * Multicommodity
 * Convergecast
-* Multiunicast
+* Many-to-Many
 
 The method combines:
 
@@ -35,9 +35,8 @@ Unlike centralized optimization approaches, MANET-GNN operates using:
 
 The framework was evaluated under:
 
-* Rayleigh fading channels
-* QuaDRiGa frequency-selective channels
-* Full CSI and noisy CSI regimes
+* QuaDRiGa frequency-selective channels (Rayleigh fading also supported)
+* Full CSI and noisy (estimated) CSI regimes
 
 and demonstrated near-centralized performance across all communication frameworks.
 
@@ -55,7 +54,10 @@ A single formulation supporting:
 | F2        | Multicast      | `multicast`    |
 | F3        | Multicommodity | `multi`        |
 | F4        | Convergecast   | `converge`     |
-| F5        | Multiunicast   | `multiunicast` |
+| F5        | Many-to-Many   | `multiunicast` |
+
+> F5 (**Many-to-Many** in the paper) is the code's `multiunicast` mode — multiple independent
+> transmitter/receiver pairs.
 
 ---
 
@@ -120,6 +122,10 @@ Decentralized-MANET/
 
 ## System Model
 
+> **Full technical details** — the complete system model, objective derivation, MANET-GNN
+> architecture (with equations), training procedure, and the key algorithmic/engineering design
+> decisions are documented in **[docs/DESIGN.md](docs/DESIGN.md)**. The sections below are a summary.
+
 We consider a dynamic multi-hop multi-channel MANET represented by an undirected graph:
 
 ```math
@@ -132,11 +138,16 @@ where:
 * Edges represent reciprocal wireless links
 * Each link contains (B) orthogonal frequency channels
 
-The achievable rate over link ((i,j)) and channel (b) is:
+Power entries are **transmission amplitudes**, and links that reuse a channel generate co-channel
+interference, so the achievable rate over link ((i,j)) and channel (b) is an **SINR** expression:
 
 ```math
-R_{i \rightarrow j}^{(b)} = \log_2\left(1 + \frac{|h_{i\rightarrow j}^{(b)}|^2 p_{i\rightarrow j}^{(b)2}}{\sigma_b^2}\right)
+R_{i \rightarrow j,k}^{(b)} = \log_2\left(1 + \frac{|h_{i\rightarrow j}^{(b)}|^2\,[P]_{b,k,i,j}^{2}}{\sigma_b^2 + I_{i\rightarrow j}^{(b)}(P)}\right)
 ```
+
+where $I_{i\rightarrow j}^{(b)}(P)$ is the aggregate co-channel interference from neighboring
+transmitters (treating interference as noise). End-to-end rates take the bottleneck along a route and
+**sum over bands**; the objective maximizes the minimum end-to-end rate across messages.
 
 The framework jointly optimizes:
 
@@ -186,15 +197,16 @@ The total loss combines:
 
 * Rate maximization (max-min end-to-end throughput)
 * Monotonic improvement regularization
-* Edge-sparsity regularization (concentrates power on the active route to limit self-interference)
+* Edge-sparsity regularization for single-message frameworks (multi-message routing is concentrated
+  by a candidate-based routing head instead)
 
-Training setup:
+Training setup (from the paper's experiments):
 
-* AdamW optimizer
-* Cosine learning-rate scheduling
-* Dropout regularization
-* Rayleigh and QuaDRiGa channels
-* SNR range: 0–50 dB
+* AdamW optimizer (lr `5e-4`, weight decay `3e-5`), cosine schedule, dropout `0.2`
+* 3 gated GNN layers (`L = 6` communication rounds)
+* QuaDRiGa frequency-selective channels (Rayleigh also supported)
+* SNR range: 0–50 dB in 5 dB steps
+* 2000 training topologies (1600 train / 400 validation), 10 nodes, 6 bands
 
 ---
 
@@ -213,16 +225,17 @@ The repository includes comparisons against the following baselines, evaluated b
 | Greedy Split (decentralized)   | Distributed shortest-path greedy split                            |
 | Equal Split                    | Uniform power allocation                                          |
 
-All methods are scored through the identical rate objective (same routing candidate set and
-band aggregation), so learned and heuristic allocations are compared on equal footing.
+All methods are scored through the identical **interference-aware** rate objective (same routing
+candidate set and band aggregation), so learned and heuristic allocations are compared on equal footing.
 
 ### Confidence intervals
 
-Rate-versus-SNR curves report the mean over a fixed set of random test networks together with
-**95% confidence intervals** (normal-approximation, `±1.96·SEM`). The benchmark stores per-network
-spread (`results["sem"]`) and the test-set size (`results["n_test"]`) alongside the means, and
-`plot_mean_rate_vs_snr` renders error bars for every method at every SNR. The test-set size is
-also annotated on the figure title, so the stability of small gaps between methods is explicit.
+Reported results are averaged over **500 independent test topologies** (10 nodes, 6 bands; `K = 4`
+messages for multi-message frameworks), with **95% confidence intervals** (normal-approximation,
+`±1.96·SEM`). The benchmark stores per-network spread (`results["sem"]`) and the test-set size
+(`results["n_test"]`) alongside the means, and `plot_mean_rate_vs_snr` renders error bars for every
+method at every SNR, annotating the test-set size on the figure title — so the stability of small gaps
+between methods (e.g. greedy-split vs MANET-GNN for unicast) is explicit.
 
 ---
 
@@ -293,25 +306,26 @@ Create or edit an `.ini` file. Example:
 seed: 7241
 mode: multi
 B: 6
-L: 2
+L: 3
 n: 10
 tx: 4
 rx: 1, 6, 7, 9
 SNR: 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
 dropout: 0.2
-lr: 1e-3
+lr: 5e-4
 wd: 3e-5
 epochs: 100
 num samples: 2000
 grad batch: 8
 mono: 0.5
+sparsity: 0.05
 LMMSE estimation: 0
 
 [Files]
 channel path: path/to/quadrigat_channels.mat  # If you don't want to use generated Rayleigh channels
 ckpt dir: path/to/checkpoints
 figs dir: path/to/figures
-prefix: _Rayleigh_Multicommodity_n_10_B_6_K_4_L_2
+prefix: _Rayleigh_Multicommodity_n_10_B_6_K_4_L_3
 ```
 
 
@@ -358,14 +372,13 @@ The paper evaluates:
 * Multicast
 * Multicommodity
 * Convergecast
-* Multiunicast
+* Many-to-Many
 
 under:
 
-* Rayleigh fading
-* QuaDRiGa channels
+* QuaDRiGa frequency-selective channels
 * Full CSI
-* Noisy CSI
+* Noisy (estimated) CSI
 
 MANET-GNN consistently approaches centralized optimization performance while preserving decentralized operation.
 
