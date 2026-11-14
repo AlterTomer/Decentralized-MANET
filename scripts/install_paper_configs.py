@@ -22,7 +22,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "config" / "paper"
 PLACEHOLDER = "<DATA_ROOT>"
-DIR_KEYS = ("ckpt dir", "figs dir")                    # folders written by training
+DIR_KEYS = ("ckpt dir", "figs dir", "out dir")         # folders written by training / the GNN studies
 FILE_KEYS = ("fig path", "fig data path")              # files written by the benchmark
 
 

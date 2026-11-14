@@ -3,11 +3,11 @@
 This guide walks through the full pipeline behind the results of the revised manuscript: channel
 generation, training of MANET-GNN and the FFN baseline, the benchmark sweeps, and the additional
 studies (graph density, non-ER topologies, heterogeneous radios, soft vs. hard routing, rate vs.
-communication rounds, and the CSI-estimation analysis). Every config used for the paper is shipped in
+communication rounds, the CSI-estimation analysis, size generalization, and depth ablation). Every config used for the paper is shipped in
 [`config/paper/`](../config/paper).
 
 > The heavy steps are the centralized-optimizer benchmark sweeps (tens of GPU-hours per main config;
-> see §4.3) and the trainings (a few hours each on a single GPU). Everything else takes minutes.
+> see §4.5) and the trainings (a few hours each on a single GPU). Everything else takes minutes.
 
 ---
 
@@ -95,6 +95,9 @@ drawn from random-number streams that are disjoint from those of the training se
   links, and a link without a common channel is removed. Support patterns are redrawn until the network
   stays connected (training set: until its connected components are unchanged).
 * The two `.pt` builders read `$MANET_DATA_ROOT\Quadriga channels`, so run them after the MATLAB sets.
+* 30-node sets (size generalization and depth ablation, §4.4): `matlab/quadriga_demo.m` with `n = 30` for the
+  training set, and a row `"Test", 30, <p>, 200, <seed>` in the `RUNS` table of `generate_R2_test_sets.m` for
+  the 200 test networks. Name the files as in `config/paper/Generalization/` (or edit the configs).
 
 ---
 
@@ -230,6 +233,7 @@ network (density study).
 | Density table | `FullCSI_density` (F1, F3–F5) | means per `p_vec` value at 10/20/30 dB; "within reach" = networks in which every destination is within L/2 hops of its source |
 | Heterogeneous-radio table | `FullCSI_hetradio` (zero-shot) and `FullCSI_hetradio_retrained` (F3–F5) | means at 10/20/30 dB, all networks and within reach (single-channel route of ≤ L/2 hops) |
 | CSI table (estimated / full, same model) | `EstimatedCSI` and `EstModelTrueCSI` | `python scripts/same_model_csi_ratio.py` (§4.3) |
+| Size generalization and depth ablation figure (F5) | `Generalization/size_generalization.ini`, `Generalization/depth_ablation.ini` (study configs) | `scripts/SizeGeneralization.py`, `scripts/DepthAblation.py` (§4.4) |
 
 ---
 
@@ -268,7 +272,45 @@ python scripts/run_benchmarks_parallel.py --workers 5 --only EstModelTrueCSI
 python scripts/same_model_csi_ratio.py       # per framework: estimated-input / true-input rate, with paired 95% CIs
 ```
 
-### 4.4 Compute budget
+### 4.4 Size generalization and depth ablation (many-to-many)
+
+Both studies evaluate **MANET-GNN only** (no benchmarks), with the same inference and scoring as the
+benchmark (decentralized candidate routing, hard per-band argmax, rate on the true channel). A *study
+config* lists any number of trained models (`[Model ...]`, each with its own depth) and test sets
+(`[Test ...]`, each with its own size, Tx/Rx nodes, and channel file); every model is evaluated on every
+test set. Format: `utils/GNNStudyUtils.py`; examples: `config/paper/Generalization/`.
+
+**Training the 30-node models.** `ChainedGNN_multiunicast_n30.ini` is the many-to-many full-CSI training
+config with |V| = 30 and 5 gated layers (L = 10). The depth-ablation models are copies that differ only in
+depth (`ChainedGNN_multiunicast_n30_L{1,2,3,7}.ini`, i.e., L = 2, 4, 6, 14), written by
+
+```bash
+python scripts/DepthAblation.py --make-train-configs "%MANET_DATA_ROOT%\Config Files\Generalization\ChainedGNN_multiunicast_n30.ini" --layers 1 2 3 7
+python scripts/Decentralized_MANET_Simulation.py <each of the five configs>
+```
+
+(`--make-train-configs` sets `L` and `max route hops` to each depth and keeps everything else.)
+
+**Evaluating.** Put the trained checkpoints into the `path` lines of the study configs, then
+
+```bash
+python scripts/DepthAblation.py "%MANET_DATA_ROOT%\Config Files\Generalization\depth_ablation.ini"
+python scripts/SizeGeneralization.py "%MANET_DATA_ROOT%\Config Files\Generalization\size_generalization.ini"
+```
+
+* `depth_ablation.ini`: the five depths on the 200 test networks with |V| = 30 → mean rate vs SNR per depth
+  (`<out prefix>_<test>.png`, the paper's depth-ablation panel) and mean rate vs L at the `summary snr`
+  values (`..._vs_depth.png`).
+* `size_generalization.ini`: the |V| = 10 model of the main results (L = 6) and the |V| = 30 model (L = 10)
+  on the same 30-node networks → mean rate vs SNR per model (the paper's size-generalization panel). Add
+  `[Test ...]` sections for more sizes; with two or more, `..._vs_size.png` plots the rate vs |V|. A model
+  applies to any size as long as the number of messages K matches its training.
+* Outputs (in `out dir`): `<out prefix>.pkl` (per-network rates, means, 95% CIs per model and test set),
+  `.csv`, and the figures. Models or test files that do not exist yet are skipped.
+* The checkpoint is checked against the model: a depth or `noise conditioning` mismatch raises an error
+  instead of silently loading a partial model.
+
+### 4.5 Compute budget
 
 The centralized optimizer dominates the cost. One optimizer run (1000 iterations, one initialization)
 takes about 3 s (F1/F2) to 8 s (F3–F5) per network and SNR on a single GPU, i.e., 500 networks × 11
@@ -282,3 +324,5 @@ prints the estimate for each config.
 * `scripts/diagnose_offroute.py` — prints, per method, how concentrated the allocation is on its
   route(s) and how interference-limited the route is (no files written).
 * `scripts/install_paper_configs.py` — installs `config/paper/` into a data root (§0.3).
+* `utils/GNNStudyUtils.py` — the MANET-GNN-only evaluation engine of §4.4 (reusable for other
+  model × test-set studies).

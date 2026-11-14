@@ -16,6 +16,7 @@ Work accompanying the second revision of the paper. The full reproduction recipe
 | Soft vs. hard routing | Same checkpoint with hard per-band argmax vs. softmax at τ_r = 0.05 and 1 | Quantify the gap between the training relaxation and deployment | `scripts/RoutingSoftVsHard.py` |
 | Rate vs. communication rounds | MANET-GNN per layer vs. Bellman–Ford benchmarks stopped after t rounds | Compare decentralized methods at an equal signaling budget | `scripts/RateVsCommunication.py` |
 | Same-model CSI analysis | Estimated-CSI models run on true vs. estimated channels | Isolate the effect of estimation errors from the difference between two trainings | `scripts/make_same_model_csi_configs.py`, `scripts/same_model_csi_ratio.py` |
+| Size generalization & depth ablation | MANET-GNN models of different depths / training sizes evaluated on the same test networks of one or more sizes (study configs list models × test sets) | Reproducible scripts for the size-generalization and depth-ablation figure | `scripts/SizeGeneralization.py`, `scripts/DepthAblation.py`, `utils/GNNStudyUtils.py`, `config/paper/Generalization/` |
 | Convergecast (F4) models | GNN and FFN trained for convergecast (full and estimated CSI) | Dedicated F4 models and benchmark | `config/paper/Convergencecast/`, `scripts/fill_convergecast_paths.py` |
 
 ### Evaluation protocol
