@@ -28,7 +28,15 @@ from time import time
 # cfg_path = args.config.resolve()
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
-cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multicast\ChainedGNN_multicast.ini"]
+# cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multicast\ChainedGNN_multicast.ini"]
+# Default: the convergecast (F4) training configs. Pass other training configs on the command line
+# (see docs/REPRODUCE.md for the config of every trained model).
+cfg_arr = [os.path.join(os.environ.get("MANET_DATA_ROOT", r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET"), r"Config Files\Convergencecast\R2\ChainedGNN_convergecast_FullCSI_R2.ini"),
+           os.path.join(os.environ.get("MANET_DATA_ROOT", r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET"), r"Config Files\Convergencecast\R2\ChainedGNN_convergecast_EstimatedCSI_R2.ini")]
+# Optional: config paths on the command line replace the list above (lets several trainings run in parallel).
+import sys
+if len(sys.argv) > 1:
+    cfg_arr = sys.argv[1:]
 
 # cfg_path =   # os.environ.get("MANET_CFG") or
 for cfg_path in cfg_arr:

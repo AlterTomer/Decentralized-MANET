@@ -643,6 +643,7 @@ from utils.DataUtils import mean_var_over_dataset
 from models.GraphNetAux import _compute_rates_per_layer
 from Multicast.SubGraphs import find_multicast_subgraphs
 from Multicommodity.Objective import edge_rates_multicommodity, objective_multicommodity
+from Multicast.Objective import objective_multicast
 
 # -------------------------------
 # Helpers
@@ -951,7 +952,9 @@ def _allocation_diagnostics(method, data, P, Z, paths_k, sigma, problem, reduce,
         out["total_power"] = _safe_float((P.float() ** 2).sum())
         return out
 
-    h = data.links_matrix.to(P.device)
+    # Diagnostics describe the ACHIEVED rates, i.e., on the true channel when CSI is estimated.
+    h_true = getattr(data, "links_true", None)
+    h = (h_true if h_true is not None else data.links_matrix).to(P.device)
     adj = data.adj_matrix.to(P.device)
     sigma_t = torch.as_tensor(sigma, device=P.device) if not isinstance(sigma, torch.Tensor) else sigma.to(P.device)
     if Z is None:
@@ -1028,12 +1031,112 @@ def _diagnose_method_store(method, dataset, store, aux_store, sigma, problem, re
             if isinstance(aux, dict):
                 Z = aux.get("Z", None)
         rate_override = rates[i] if rates is not None and i < len(rates) else None
-        if skip:
+        if skip or P is None:
             diags.append({"method": method, "rate": 0.0, "skip": True})
             continue
         diags.append(_allocation_diagnostics(method, d, P.to(device), Z.to(device) if isinstance(Z, torch.Tensor) else Z,
                                              paths_k, sigma, problem, reduce, max_route_hops, rate_override))
     return diags
+
+
+# Step sizes of the centralized optimizer's full search (the default step size, 0.1, is included).
+OPTIMIZER_FULL_LR_GRID = (0.01, 0.03, 0.1, 0.3, 1.0)
+
+
+def reference_channel_var(dataset):
+    """
+    Average channel power used to map SNR (dB) -> noise std. For an estimated-CSI dataset the
+    TRUE channel (d.links_true) is used, so that full- and estimated-CSI runs share the same noise
+    level at each nominal SNR (H_hat from LMMSE has lower average power than H).
+    """
+    if len(dataset) > 0 and getattr(dataset[0], "links_true", None) is not None:
+        class _True:  # minimal view exposing the true channel as links_matrix
+            def __init__(self, d):
+                self.links_matrix, self.adj_matrix = d.links_true, d.adj_matrix
+        return mean_var_over_dataset([_True(d) for d in dataset])
+    return mean_var_over_dataset(dataset)
+
+
+def _supported_channel_projection(P, h, adj):
+    """
+    Heterogeneous radios: a node cannot transmit over a channel it does not support, which the system
+    model represents by h = 0 on that link-channel. Each node therefore drops the power it assigned to
+    unsupported link-channels and rescales its remaining allocation to the same total power (a local
+    operation, since every node knows the channels it supports). On networks where every existing
+    link has nonzero coefficients on all channels this is an exact no-op.
+    P: [B,n,n] or [B,K,n,n]; h: [B,n,n] complex; adj: [n,n].
+    """
+    unsupported = (h.abs() == 0) & adj.bool().unsqueeze(0)                      # [B,n,n]
+    if not bool(unsupported.any()):
+        return P
+    keep = (~unsupported).to(P.dtype)
+    if P.dim() == 4:
+        keep = keep.unsqueeze(1)                                                  # [B,1,n,n]
+    red = (0, 1, 3) if P.dim() == 4 else (0, 2)                                   # all but the source node
+    before = P.pow(2).sum(dim=red, keepdim=True).sqrt()
+    Pm = P * keep
+    after = Pm.pow(2).sum(dim=red, keepdim=True).sqrt()
+    scale = torch.where(after > 0, before / after.clamp_min(1e-12), torch.zeros_like(after))
+    return Pm * scale
+
+
+def dataset_has_unsupported_channels(dataset):
+    """True if some existing link has an exactly-zero coefficient on some channel (heterogeneous radios)."""
+    for d in dataset:
+        h = getattr(d, "links_true", None)
+        h = d.links_matrix if h is None else h
+        if bool(((h.abs() == 0) & d.adj_matrix.bool().unsqueeze(0)).any()):
+            return True
+    return False
+
+
+def _score_allocations(dataset, store, aux_store, sigma, problem, reduce, B, device, struct_cache,
+                       use_true_csi: bool = True):
+    """
+    Score stored allocations with the original (hard min/max) objective.
+
+    Every method decides its allocation from ``d.links_matrix``, which for an estimated-CSI
+    dataset holds H_hat. The achieved rate, however, is determined by the channel the signals
+    actually experience. With ``use_true_csi=True`` the allocation is scored on ``d.links_true``
+    (the true channel exposed by EstimatedCSIDataset); for a true-CSI dataset ``links_true`` is
+    absent and the allocation is scored on ``d.links_matrix``, reproducing the original rate.
+
+    store[i] is P, (P, Z), or None; aux_store[i] may be a dict carrying "Z".
+    """
+    sig = torch.as_tensor(sigma, dtype=torch.float32, device=device)
+    rates = []
+    for i, d in enumerate(dataset):
+        P = store[i] if i < len(store) else None
+        Z = None
+        if isinstance(P, (tuple, list)):
+            P, Z = (P[0], P[1]) if len(P) >= 2 else (P[0], None)
+        elif aux_store is not None and i < len(aux_store) and isinstance(aux_store[i], dict):
+            Z = aux_store[i].get("Z", None)
+        paths, subgraphs_per_band, paths_k, skip = _build_eval_structures(i, d, B, problem, device, struct_cache)
+        if skip or P is None:
+            rates.append(0.0)
+            continue
+        h = getattr(d, "links_true", None) if use_true_csi else None
+        if h is None:
+            h = d.links_matrix
+        h = h.to(device)
+        adj = d.adj_matrix.to(device)
+        P = (P.real if torch.is_complex(P) else P).to(device).float()  # some skip placeholders are complex zeros
+        P = _supported_channel_projection(P, h, adj)
+        with torch.no_grad():
+            if problem == "single":
+                r = calc_sum_rate(h_arr=h, p_arr=P, sigma=sig, paths_tensor=paths, B=B,
+                                  tau_min=0.0, tau_max=0.0, eps=1e-12, per_band=False)
+            elif problem == "multicast":
+                r = objective_multicast(h=h, p=P, sigma=sig, adj=adj,
+                                        subgraphs_per_band=subgraphs_per_band, eps=1e-12,
+                                        tau_min=0.0, tau_max=0.0, per_band=False)
+            else:
+                Zt = torch.ones_like(P) if Z is None else Z.to(device).float()
+                r = objective_multicommodity(h=h, p=P, z=Zt, sigma=sig, adj=adj, paths_k=paths_k,
+                                             tau_min=0.0, tau_max=0.0, reduce=reduce, per_band=False)
+        rates.append(_safe_float(r, 0.0))
+    return np.asarray(rates, dtype=float)
 
 
 def evaluate_across_snr(
@@ -1052,6 +1155,12 @@ def evaluate_across_snr(
     optimizer_lr_grid=None,       # Optional list of LRs for the centralized optimizer line search.
     ffn_model=None,               # Optional trained FFNPowerAllocator; None -> FFN curve stays 0.
     ffn_dataset=None,             # FFNDataset aligned with `dataset` (SAME CSI: true or estimated).
+    score_on_true_csi: bool = True,  # Estimated-CSI datasets: decide on H_hat, score on the TRUE channel.
+    optimizer_snr_db=None,        # SNRs (dB) at which the centralized optimizer is run; None -> all.
+    optimizer_full_search: bool = False,  # 4 inits (incl. random) x OPTIMIZER_FULL_LR_GRID step sizes.
+    optimizer_lr: float = 0.1,            # (initial) step size of the centralized optimizer.
+    optimizer_lr_final=None,              # None -> constant step; else geometric decay to this value.
+    optimizer_iterations: int = 1000,     # AdamW updates per initialization.
 ):
     """
     Sequential evaluation across SNR values.
@@ -1070,6 +1179,7 @@ def evaluate_across_snr(
         "equal power",
         "greedy maxlink",
         "greedy maxlink decentralized",
+        "centralized reduced",   # filled only in optimizer full-search mode
     ]
     results = {k: {} for k in method_keys}
     # Per-SNR standard error of the mean rate (std / sqrt(N)), same keys as the mean
@@ -1077,10 +1187,13 @@ def evaluate_across_snr(
     # test networks the means/SEMs are computed over (for the reviewer's stated N).
     results["sem"] = {k: {} for k in method_keys}
     results["n_test"] = len(dataset)
+    # Per-network rates (aligned with the dataset order), e.g. for per-density breakdowns.
+    results["per_sample"] = {k: {} for k in method_keys}
 
     def _record(method_key, snr_key, per_sample_rates):
         """Store the mean rate and its standard error for one method at one SNR."""
         arr = np.asarray(list(per_sample_rates), dtype=float)
+        results["per_sample"][method_key][snr_key] = arr.tolist()
         results[method_key][snr_key] = float(arr.mean()) if arr.size else 0.0
         # ddof=1 sample std; SEM = std / sqrt(N). Undefined for N<2 -> 0.
         if arr.size > 1:
@@ -1093,6 +1206,29 @@ def evaluate_across_snr(
         results["diagnostics_summary"] = {}
 
     diagnostics_snr_set = None if diagnostics_snr is None else {int(x) for x in diagnostics_snr}
+    optimizer_snr_set = None if optimizer_snr_db is None else {int(x) for x in optimizer_snr_db}
+    results["optimizer_snr_db"] = None if optimizer_snr_set is None else sorted(optimizer_snr_set)
+    results["optimizer_full_search"] = bool(optimizer_full_search)
+    results["optimizer_schedule"] = {"lr": float(optimizer_lr), "iterations": int(optimizer_iterations),
+                                     "lr_final": None if optimizer_lr_final is None else float(optimizer_lr_final)}
+
+    # Estimated CSI: every method decides from H_hat (d.links_matrix), but the achieved rate is
+    # what the true channel delivers, so all methods are re-scored on d.links_true.
+    true_csi_scoring = bool(score_on_true_csi and len(dataset) > 0
+                            and getattr(dataset[0], "links_true", None) is not None)
+    # Heterogeneous radios: re-score every method after the (local) supported-channel projection.
+    hetero_radios = dataset_has_unsupported_channels(dataset)
+    results["scored_on_true_csi"] = true_csi_scoring
+    results["heterogeneous_radios"] = hetero_radios
+    score_struct_cache = {}
+    print(f"[scoring] {'TRUE channel (decisions on estimated CSI)' if true_csi_scoring else 'dataset channel'}"
+          f"{' | heterogeneous radios: supported-channel projection' if hetero_radios else ''}")
+
+    def _true_rates(rates_in, store, aux_store=None, sigma_now=None):
+        if not (true_csi_scoring or hetero_radios):
+            return rates_in
+        return _score_allocations(dataset, store, aux_store, sigma_now, problem, reduce, B, device,
+                                  score_struct_cache, use_true_csi=True)
 
     # FFN benchmark loader (optional). ffn_dataset already carries the SAME CSI as `dataset`
     # (true or estimated); evaluate_ffn forwards AND scores on it, at the per-SNR sigma below.
@@ -1103,7 +1239,7 @@ def evaluate_across_snr(
         ffn_model.eval()
         print(f"[FFN] benchmark enabled: {len(ffn_dataset)} samples.")
 
-    mean_channel_var = mean_var_over_dataset(dataset)
+    mean_channel_var = reference_channel_var(dataset)  # true-channel power, also for estimated CSI
     gnn_struct_cache = {}
     heuristic_paths_cache = {}
     diag_struct_cache = {}
@@ -1171,6 +1307,8 @@ def evaluate_across_snr(
                 else:
                     gnn_z_store.append(None)
                 gnn_rate_store.append(rate)
+            rates = _true_rates(rates, list(zip(gnn_p_store, gnn_z_store)), sigma_now=sigma)
+            gnn_rate_store = [float(r) for r in rates]
             _record("gnn", snr_db, rates)
             if keep_raw_diag:
                 gnn_diags = []
@@ -1189,46 +1327,19 @@ def evaluate_across_snr(
         # 2) FFN mean rate
         # =================================================
         if ffn_loader is not None:
-            ffn_rates, _ = evaluate_ffn(
+            ffn_rates, ffn_p = evaluate_ffn(
                 ffn_model, ffn_loader, sigma_noise=sigma, problem=problem, reduce=reduce,
             )
+            if len(ffn_rates):
+                ffn_rates = _true_rates(ffn_rates, ffn_p, sigma_now=sigma)
             _record("ffn", snr_db, ffn_rates if len(ffn_rates) else [0.0])
         else:
             results["ffn"][snr_db] = 0
             results["sem"]["ffn"][snr_db] = 0.0
 
         # ==============================================
-        # 3) Centralized ADAM benchmark
-        # ==============================================
-        # Warm-start the multi-message optimizer from the GNN allocation (multi-init with
-        # greedy). Guarantees optimizer >= max(greedy, GNN) via classic_opt's best-iterate
-        # return, so the optimizer stays a valid upper reference instead of being beaten by
-        # the GNN / collapsing at high SNR. Ignored internally for single/multicast.
-        opt_warm_start = list(zip(gnn_p_store, gnn_z_store)) if problem in {"multi", "converge", "multiunicast"} else None
-        adam_out = evaluate_centralized_adam(
-            dataset,
-            B,
-            noise_std=sigma,
-            num_iterations=1000,
-            problem=problem,
-            reduce=reduce,
-            return_aux=keep_raw_diag,
-            warm_start=opt_warm_start,
-            lr_grid=optimizer_lr_grid,
-        )
-        if keep_raw_diag:
-            adam_rates, adam_p, adam_aux = adam_out
-        else:
-            adam_rates, adam_p = adam_out
-            adam_aux = None
-        _record("centralized", snr_db, adam_rates)
-        if keep_raw_diag:
-            snr_diags["centralized"] = _diagnose_method_store(
-                "centralized", dataset, adam_p, adam_aux, sigma, problem, reduce, B, device, diag_struct_cache,
-                dec_rounds, rates=adam_rates)
-
-        # ==============================================
-        # 4) Strongest bottleneck lower bound
+        # 3) Strongest bottleneck (centralized widest path) -- computed before the optimizer,
+        #    whose initializations include this allocation.
         # ==============================================
         bottleneck_rates, bottleneck_store = compute_centralized_best_single_channel_rate(
             dataset,
@@ -1237,11 +1348,60 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
+        bottleneck_rates = _true_rates(bottleneck_rates, bottleneck_store, sigma_now=sigma)
         _record("strongest bottleneck", snr_db, bottleneck_rates)
         if keep_raw_diag:
             snr_diags["strongest bottleneck"] = _diagnose_method_store(
                 "strongest bottleneck", dataset, bottleneck_store, None, sigma, problem, reduce, B, device,
                 diag_struct_cache, dec_rounds, rates=bottleneck_rates)
+
+        # ==============================================
+        # 4) Centralized optimizer (AdamW), evaluated on its own (possibly coarser) SNR grid.
+        #    Initializations: greedy split (built in), widest path, and MANET-GNN, for every
+        #    framework; classic_opt keeps the best iterate, so the optimizer is >= each of them.
+        #    Full search additionally uses a random init and a step-size grid, and also reports
+        #    the reduced optimizer on the same networks ("centralized reduced").
+        # ==============================================
+        if optimizer_snr_set is None or int(snr_db) in optimizer_snr_set:
+            opt_warm_start = [
+                {"widest": bottleneck_store[i] if i < len(bottleneck_store) else None,
+                 "gnn": (gnn_p_store[i], gnn_z_store[i]) if gnn_p_store[i] is not None else None}
+                for i in range(len(dataset))
+            ]
+            need_aux = keep_raw_diag or true_csi_scoring or hetero_radios or optimizer_full_search
+            adam_out = evaluate_centralized_adam(
+                dataset,
+                B,
+                noise_std=sigma,
+                lr=optimizer_lr,
+                num_iterations=optimizer_iterations,
+                problem=problem,
+                reduce=reduce,
+                return_aux=need_aux,   # Z is needed to re-score F3-F5 allocations
+                warm_start=opt_warm_start,
+                lr_grid=(OPTIMIZER_FULL_LR_GRID if optimizer_full_search else optimizer_lr_grid),
+                random_init=optimizer_full_search,
+                lr_final=optimizer_lr_final,
+            )
+            if need_aux:
+                adam_rates, adam_p, adam_aux = adam_out
+            else:
+                adam_rates, adam_p = adam_out
+                adam_aux = None
+            adam_rates = _true_rates(adam_rates, adam_p, adam_aux, sigma_now=sigma)
+            _record("centralized", snr_db, adam_rates)
+            if optimizer_full_search:
+                red_store = [(a.get("P_reduced"), a.get("Z_reduced")) if a.get("P_reduced") is not None else None
+                             for a in adam_aux]
+                red_rates = _true_rates([a.get("reduced_rate", 0.0) for a in adam_aux], red_store,
+                                        sigma_now=sigma)
+                _record("centralized reduced", snr_db, red_rates)
+                results.setdefault("optimizer_best_init", {})[snr_db] = [a.get("best_init") for a in adam_aux]
+                results.setdefault("optimizer_best_lr", {})[snr_db] = [a.get("best_lr") for a in adam_aux]
+            if keep_raw_diag:
+                snr_diags["centralized"] = _diagnose_method_store(
+                    "centralized", dataset, adam_p, adam_aux, sigma, problem, reduce, B, device, diag_struct_cache,
+                    dec_rounds, rates=adam_rates)
 
         bottleneck_rates_decentralized, bottleneck_dec_store, bottleneck_dec_aux = compute_decentralized_best_single_channel_rate(
             dataset,
@@ -1251,6 +1411,8 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
+        bottleneck_rates_decentralized = _true_rates(bottleneck_rates_decentralized, bottleneck_dec_store,
+                                                     bottleneck_dec_aux, sigma_now=sigma)
         _record("strongest bottleneck decentralized", snr_db, bottleneck_rates_decentralized)
         if keep_raw_diag:
             snr_diags["strongest bottleneck decentralized"] = _diagnose_method_store(
@@ -1267,6 +1429,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
+        rates_equal_power = _true_rates(rates_equal_power, equal_store, sigma_now=sigma)
         _record("equal power", snr_db, rates_equal_power)
         if keep_raw_diag:
             snr_diags["equal power"] = _diagnose_method_store(
@@ -1283,6 +1446,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
+        rates_greedy = _true_rates(rates_greedy, greedy_store, sigma_now=sigma)
         _record("greedy maxlink", snr_db, rates_greedy)
         if keep_raw_diag:
             snr_diags["greedy maxlink"] = _diagnose_method_store(
@@ -1297,6 +1461,7 @@ def evaluate_across_snr(
             paths_cache=heuristic_paths_cache,
             reduce=reduce,
         )
+        rates_greedy_decentralized = _true_rates(rates_greedy_decentralized, greedy_dec_store, sigma_now=sigma)
         _record("greedy maxlink decentralized", snr_db, rates_greedy_decentralized)
         if keep_raw_diag:
             snr_diags["greedy maxlink decentralized"] = _diagnose_method_store(

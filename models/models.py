@@ -797,6 +797,9 @@ class CandidateRoutingHead(nn.Module):
     def __init__(self, edge_hidden: int, hidden: int = 64, *, exclude_desired_from_exposure: bool = True):
         super().__init__()
         self.exclude_desired_from_exposure = exclude_desired_from_exposure
+        # Exclude (band, route) options with a hop that does not support the band (see
+        # _score_and_scatter_one_commodity). Not a parameter, so old checkpoints load unchanged.
+        self.mask_dead_routes = True
         self.scorer = nn.Sequential(
             nn.Linear(edge_hidden + self.N_ROUTE_FEATS, hidden),
             nn.LeakyReLU(0.1),
@@ -920,6 +923,21 @@ class CandidateRoutingHead(nn.Module):
         scorer_in = torch.cat([route_emb_bm, route_feats.to(dtype=dtype)], dim=-1)  # [B,M,D+4]
         scores = self.scorer(scorer_in.reshape(B * M, -1)).reshape(B, M)  # [B,M]
 
+        # Unsupported channels (heterogeneous radios): a route whose hop (u,v) has h_{u->v}^{(b)} = 0
+        # cannot carry a message over channel b, since the message keeps its channel along the route.
+        # Each node knows the channels its own links support, so this test is local, like the route
+        # features above. Such (band, route) options are excluded from the selection; if a band has no
+        # live route for this commodity, the commodity is not routed over that band (Z = 0 there), so
+        # normalize_power moves its power to the live bands. When every link supports every band (the
+        # homogeneous test sets), no route is dead and this is an exact no-op.
+        dead = None
+        if self.mask_dead_routes:
+            dead = ((g <= 0) & valid_bmt).any(dim=-1)  # [B,M]
+            if dead.any():
+                scores = scores.masked_fill(dead, -1e4)
+            else:
+                dead = None
+
         tau = max(float(tau), 1e-6)
         # Per-band route selection (Eq. 9): each band independently picks its best route,
         # and R_k sums over bands. This keeps all B bands live for the commodity instead of
@@ -931,6 +949,8 @@ class CandidateRoutingHead(nn.Module):
             pi.scatter_(1, idx.unsqueeze(1), 1.0)      # [B,M]
         else:
             pi = torch.softmax(scores / tau, dim=1)    # [B,M] per-band distribution over routes
+        if dead is not None:
+            pi = pi * (~dead).to(pi.dtype)              # bands with no live route: no selection
 
         # Scatter candidate probabilities onto their path-incidence edges.
         b_idx = torch.arange(B, device=device).view(B, 1, 1).expand(B, M, T)

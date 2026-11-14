@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Run outputs (kept in the data root, see docs/REPRODUCE.md)
+logs*/
+*.pkl
+*.pth
+/*.png
+
+# IDE
+.idea/.name
+.idea/workspace.xml
+
+# Local scratch / one-off scripts
+scripts/PlayGround.py

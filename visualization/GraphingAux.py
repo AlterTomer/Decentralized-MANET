@@ -144,10 +144,15 @@ def plot_mean_rate_vs_snr(snr_db, results, save_path=None, show_error_bars=True,
 
     plt.figure(figsize=(16, 12))
     for key, marker, label, linestyle in series:
+        if not results.get(key):
+            continue
+        # Each method is plotted at the SNRs it was evaluated at (the centralized optimizer may
+        # be evaluated on a coarser SNR grid than the other methods).
+        x = np.array(list(results[key].keys()), dtype=float)
         y = np.array(list(results[key].values()), dtype=float)
         yerr = _yerr(y, key)
         plt.errorbar(
-            snr_db, y, yerr=yerr, marker=marker, label=label, linestyle=linestyle,
+            x, y, yerr=yerr, marker=marker, label=label, linestyle=linestyle,
             markersize=12, capsize=5, capthick=1.5, elinewidth=1.5,
         )
 

@@ -114,14 +114,19 @@ def generate_graph_data(n_list, tx_list, rx_list, sigma_list, B, K=1, seed=1000,
     num_samples = len(n_list)
 
     if channel_path:
-        mat = mat73.loadmat(channel_path)
-        raw_channels = mat['H_all']
+        if str(channel_path).strip().lower().endswith(".pt"):
+            # Torch dict, e.g. from scripts/make_heterogeneous_radio_set.py: {'H_all': [S,B,n,n], 'p_vec': [S], ...}
+            raw_channels = torch.load(channel_path.strip(), weights_only=False)['H_all']
+        else:
+            mat = mat73.loadmat(channel_path)
+            raw_channels = mat['H_all']
         print(f"Loaded channel matrix from {channel_path} with shape {raw_channels.shape}")
         # num_samples = raw_channels.shape[0]
         # if raw_channels.shape[0] != num_samples:
         #     raise ValueError(f"Mismatch: {num_samples} graphs expected, but .mat contains {raw_channels.shape[0]} samples.")
 
-        for i in range(raw_channels.shape[0]):
+        # Use the first num_samples networks of the file (a file may hold more networks than needed).
+        for i in range(min(int(raw_channels.shape[0]), num_samples)):
             links = torch.as_tensor(raw_channels[i], dtype=torch.cfloat, device=device)
             adj = (links.abs().sum(dim=0) > 0).float()
             adj.fill_diagonal_(0)

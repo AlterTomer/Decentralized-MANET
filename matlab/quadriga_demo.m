@@ -1,43 +1,73 @@
-% RUN_QUADRIGA_DEMO: Simulate realistic MANET SISO channel matrices
-% using QuaDRiGa for a fixed urban microcell LOS scenario.
-addpath(genpath("C:\Users\User\Desktop\MS.c\Ph.D\Distributed OFDMA MANETs\Matlab\QuaDRiGa-main")); 
-% savepath;
+% RUN_QUADRIGA_DEMO: Simulate realistic MANET SISO channel matrices with QuaDRiGa
+% (scenario 5G-ALLSTAR_DenseUrban, one fixed node layout shared by all networks).
+% With the parameters below it generates the TRAINING set of the paper:
+%   n = 10 -> Train_H_seed_48312_n_10_B_6_samples_2000.mat (unicast, F3-F5)
+%   n = 6  -> the multicast (F2) training set
+% Edit output_dir and the addpath line below to your local folders.
 
-% ===== Parameters =====
-n = 8;                  % Number of nodes
-B = 6;                 % Number of frequency bands
-seed = 1337;             % Random seed
-scenario = '3GPP_3D_UMi_LOS';  % QuaDRiGa built-in scenario
-output_dir = 'quadriga_demo_output';
+%% -------------------- Path setup --------------------
+thisFile = mfilename('fullpath');
+repoRoot = fileparts(thisFile);  % Folder containing quadriga_demo.m
+
+addpath('C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Matlab');
+addpath(repoRoot);
+addpath(genpath(fullfile(repoRoot, 'quadriga_src')));
+rehash;
+
+%% -------------------- Parameters --------------------
+n = 10;                              % Number of nodes
+B = 6;                               % Number of frequency bands
+seed = 48312;                        % Random seed
+scenario = '5G-ALLSTAR_DenseUrban';  % QuaDRiGa built-in scenario
+output_dir = ['C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\' ...
+              'Quadriga channels\'];
+
 desired_mean = 0;
 desired_std = 1;
-num_samples = 4000;
-% ===== Node Positions (realistic street-level layout in meters) =====
-% X, Y: position in a 100x100m urban block
-% Z: height in meters (ground devices = 1.5m, 2 devices on 2nd floor = 3m)
-% Auto-generate positions for n nodes
+num_samples = 2000;                 % Requested number of samples
+p = [0.3];                % Graph edge probabilities
+
+%% -------------------- Node positions --------------------
+% X and Y are in a 100-by-100 m urban block.
+% Z is 1.5 m for 80%% of nodes and 3.0 m for the remaining 20%%.
+rng(seed);
 positions = [ ...
-    rand(1, n) * 100;        % X in [0, 100] meters
-    rand(1, n) * 100;        % Y in [0, 100] meters
-    1.5 + (rand(1, n) < 0.2) * 1.5  % Z: 80% ground (1.5m), 20% elevated (3.0m)
+    rand(1, n) * 100; ...
+    rand(1, n) * 100; ...
+    1.5 + (rand(1, n) < 0.2) * 1.5 ...
 ];
 
-% ===== Adjacency Matrix (bidirectional MANET graph) =====
-p = 0.3;
-A = triu(rand(n) < p, 1);
-A = A + A';
+%% -------------------- Generate channels --------------------
+[H_all, p_per_sample] = generate_quadriga_channels_with_scenario( ...
+    n, p, positions, B, desired_mean, desired_std, seed, scenario, ...
+    num_samples, output_dir);
 
-% ===== Call Simulation =====
-generate_quadriga_channels_with_scenario(A, positions, B, desired_mean, desired_std, seed, scenario, num_samples, output_dir);
+num_samples_actual = size(H_all, 1);
 
-% ===== Load and Inspect Output =====
-load(fullfile(output_dir, 'H_seed_1337_n_8_B_6_samples_4000.mat'));
-disp(['Loaded H_all of size ', mat2str(size(H_all))]);
+% Create a filesystem-safe label such as "0p1_0p2_0p3".
+p_strings = arrayfun(@(x) strrep(sprintf('%g', x), '.', 'p'), ...
+    p, 'UniformOutput', false);
+p_label = strjoin(p_strings, '_');
 
-% Example: Plot magnitude response between node 1 and node 2
+output_filename = sprintf( ...
+    'Train_H_seed_%d_n_%d_B_%d_samples_%d.mat', ...
+    seed, n, B, num_samples_actual);
+output_path = fullfile(output_dir, output_filename);
+
+%% Save p and p_per_sample so every channel realization can be traced to
+% the graph-density value used to generate it.
+save(output_path, 'H_all', 'p', 'p_per_sample', ...
+    'num_samples', 'num_samples_actual', 'positions', '-v7.3');
+
+fprintf('Saved H_all with size [%s] to:\n%s\n', ...
+    num2str(size(H_all)), output_path);
+fprintf('Samples per p value: %d\n', num_samples_actual / numel(p));
+
+% Example: inspect one B-bin channel vector between nodes 1 and 2.
+% sample_idx = 1;
 % figure;
-% plot(abs(squeeze(H_all(1,2,:))), 'LineWidth', 1.5);
-% xlabel('Frequency Bin');
-% ylabel('|H_{1,2}(f)|');
-% title('Channel Magnitude between Node 1 and 2');
+% stem(abs(squeeze(H_all(sample_idx, :, 1, 2))), 'LineWidth', 1.5);
+% xlabel('Frequency Band');
+% ylabel('|H_{1,2}|');
+% title(sprintf('Sample %d, p = %.2f', sample_idx, p_per_sample(sample_idx)));
 % grid on;

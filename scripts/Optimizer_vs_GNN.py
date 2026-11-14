@@ -1,3 +1,4 @@
+import os
 import torch
 from pathlib import Path
 from configparser import ConfigParser
@@ -19,17 +20,71 @@ from MANET_FFN.model import FFNPowerAllocator
 # parser = load_ini_config(cfg_path)
 # print(f"Loaded config from CLI: {cfg_path}")
 
-cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multicast\comp_multicast.ini",
-           r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multicommodity\comp_multicommodity.ini",
-           r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multiunicast\comp_multiunicast.ini",
-           r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Single Tx-Rx\comp_unicast.ini"]
+# Benchmark configs (see docs/REPRODUCE.md; a copy of every config is in config/paper/): connected test
+# networks generated independently of the training data (matlab/generate_R2_test_sets.m). Main figures:
+# 500 networks with p = 0.3, full and estimated CSI. Estimated CSI: every method decides from H_hat and
+# is scored on the true channel. Config folder: $MANET_DATA_ROOT/Config Files (or config/paper).
+_CFG = Path(os.path.join(os.environ.get("MANET_DATA_ROOT", r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET"), r"Config Files"))
+cfg_arr = [
+    _CFG / fw / "R2" / f"comp_{tag}_{csi}_R2.ini"
+    for fw, tag in (("Single Tx-Rx", "unicast"), ("Multicommodity", "multicommodity"),
+                    ("Multiunicast", "multiunicast"), ("Convergencecast", "convergecast"),
+                    ("Multicast", "multicast"))
+    for csi in ("FullCSI", "EstimatedCSI")
+] + [
+    # Density study (full CSI): 100 fresh connected networks per p in {0.1, ..., 0.5}; results carry p_vec.
+    _CFG / fw / "R2" / f"comp_{tag}_FullCSI_density_R2.ini"
+    for fw, tag in (("Single Tx-Rx", "unicast"), ("Multicommodity", "multicommodity"),
+                    ("Multiunicast", "multiunicast"), ("Convergencecast", "convergecast"))
+] + [
+    # Non-ER topologies (full CSI, zero-shot, 200 networks each), matlab/generate_R2_topology_sets.m:
+    # random geometric (unit-disk) graphs and node-heterogeneous hub/periphery graphs.
+    _CFG / fw / "R2" / f"comp_{tag}_FullCSI_{fam}_R2.ini"
+    for fam in ("rgg", "hub")
+    for fw, tag in (("Single Tx-Rx", "unicast"), ("Multicommodity", "multicommodity"),
+                    ("Multiunicast", "multiunicast"), ("Convergencecast", "convergecast"))
+] + [
+    # Heterogeneous radios (full CSI, zero-shot): each node supports a random subset of the channels;
+    # unsupported channels have zero coefficients (scripts/make_heterogeneous_radio_set.py).
+    _CFG / fw / "R2" / f"comp_{tag}_FullCSI_hetradio_R2.ini"
+    for fw, tag in (("Single Tx-Rx", "unicast"), ("Multicommodity", "multicommodity"),
+                    ("Multiunicast", "multiunicast"), ("Convergencecast", "convergecast"))
+] + [
+    # Heterogeneous radios, models retrained on heterogeneous-radio training data (F3-F5).
+    _CFG / fw / "R2" / f"comp_{tag}_FullCSI_hetradio_retrained_R2.ini"
+    for fw, tag in (("Multicommodity", "multicommodity"), ("Multiunicast", "multiunicast"),
+                    ("Convergencecast", "convergecast"))
+]
+
+# Optional CLI override (used by scripts/run_benchmarks_parallel.py):
+#   python scripts/Optimizer_vs_GNN.py --configs <cfg1.ini> <cfg2.ini> ...
+import sys as _sys
+if "--configs" in _sys.argv:
+    cfg_arr = [Path(a) for a in _sys.argv[_sys.argv.index("--configs") + 1:] if not a.startswith("--")]
+
+
+def _int_list(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    return [int(float(x)) for x in raw.replace(" ", "").split(",") if x]
+
 
 for path in cfg_arr:
-    # cfg_path = r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\Multiunicast\comp_multiunicast.ini"
     cfg_path = path
+    if not Path(cfg_path).exists():
+        print(f"[skip] {Path(cfg_path).name}: config not found")
+        continue
     parser = ConfigParser()
     parser.read_file(open(cfg_path))
     print(f"Loaded default config: {cfg_path}")
+    # Skip configs whose inputs do not exist yet (e.g., convergecast before training, multicast
+    # before its MATLAB test set is generated) instead of aborting the whole sweep.
+    _missing = [k for k in ("channel path", "model path")
+                if not Path(parser["Files"].get(k, "").strip()).exists()]
+    if _missing:
+        print(f"[skip] {Path(cfg_path).name}: missing {', '.join(_missing)}")
+        continue
 
     USE_AMP = torch.cuda.is_available()
     # Training Parameters
@@ -258,7 +313,19 @@ for path in cfg_arr:
 
     g = torch.Generator().manual_seed(SEED)
 
-    snr_db_list = list(range(0, 51, 2))
+    # SNR grid of all methods ("snr list") and of the centralized optimizer ("optimizer snr"; None -> all).
+    snr_db_list = _int_list(train_params.get("snr list", "")) or list(range(0, 51, 2))
+    OPTIMIZER_SNR = _int_list(train_params.get("optimizer snr", ""))
+    OPTIMIZER_FULL_SEARCH = int(train_params.get("optimizer full search", 0)) == 1
+    # Optimizer step size: constant "optimizer lr" (default 0.1), or a geometric decay from it to
+    # "optimizer lr final"; "optimizer iterations" updates per initialization (default 1000).
+    OPTIMIZER_LR = float(train_params.get("optimizer lr", 0.1))
+    _lr_final = str(train_params.get("optimizer lr final", "")).strip()
+    OPTIMIZER_LR_FINAL = float(_lr_final) if _lr_final else None
+    OPTIMIZER_ITERATIONS = int(train_params.get("optimizer iterations", 1000))
+    print(f"[snr] all methods: {snr_db_list} | optimizer: {OPTIMIZER_SNR or 'all'}"
+          f" | optimizer full search: {OPTIMIZER_FULL_SEARCH} | optimizer lr {OPTIMIZER_LR}"
+          f"{f' -> {OPTIMIZER_LR_FINAL}' if OPTIMIZER_LR_FINAL else ''}, {OPTIMIZER_ITERATIONS} iterations")
     results = evaluate_across_snr(
         dataset,
         model,
@@ -273,7 +340,25 @@ for path in cfg_arr:
         hard_candidate_gnn_inference=HARD_CANDIDATE_GNN_INFERENCE,
         ffn_model=ffn_model,
         ffn_dataset=ffn_dataset,
+        optimizer_snr_db=OPTIMIZER_SNR,
+        optimizer_full_search=OPTIMIZER_FULL_SEARCH,
+        optimizer_lr=OPTIMIZER_LR,
+        optimizer_lr_final=OPTIMIZER_LR_FINAL,
+        optimizer_iterations=OPTIMIZER_ITERATIONS,
     )
+    # Per-network ER edge probability (aligned with results["per_sample"]) for per-density breakdowns.
+    try:
+        if channel_path and str(channel_path).strip().lower().endswith(".pt"):
+            results["p_vec"] = torch.load(channel_path.strip(), weights_only=False)["p_vec"].tolist()
+        elif channel_path:
+            import mat73
+            _pv = mat73.loadmat(channel_path.strip()).get("p_vec", None)
+            if _pv is not None:
+                results["p_vec"] = [float(x) for x in list(_pv)]
+    except Exception as e:
+        print(f"[p_vec] not stored: {e}")
+    if "p_vec" in results:
+        results["p_vec"] = results["p_vec"][: results["n_test"]]   # the first num_samples networks are used
     with open(fig_data_path, "wb") as file:
         pickle.dump(results, file)
 

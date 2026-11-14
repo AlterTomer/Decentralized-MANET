@@ -40,6 +40,10 @@ The framework was evaluated under:
 
 and demonstrated near-centralized performance across all communication frameworks.
 
+> **Reproducing the paper:** see **[docs/REPRODUCE.md](docs/REPRODUCE.md)** (data generation, training,
+> benchmarks, and every additional study, with the exact configs in [config/paper/](config/paper)).
+> **What's new in the second revision:** see [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## Key Features
@@ -100,20 +104,21 @@ The model generalizes across:
 
 ## Repository Structure
 
-> Adjust paths below if you later reorganize the repository.
-
 ```text
 Decentralized-MANET/
 │
+├── MANET_FFN/                 # FFN baseline (B7): model, dataset, training (main.py)
 ├── Multicast/                 # Multicast subgraph and objective utilities
 ├── Multicommodity/            # Multicommodity objective utilities
-├── configs/                   # Experiment configurations
+├── config/                    # Example configs + config/paper/: the configs of every reported result
 ├── datasets/                  # Dataset generation and loading utilities
-├── matlab/                    # QuaDRiGa-related utilities and channel generation
+├── docs/                      # DESIGN.md (technical notes), REPRODUCE.md (reproduction guide)
+├── matlab/                    # QuaDRiGa channel and test-set generation
 ├── models/                    # MANET-GNN architectures and layers, aux function for training and evaluation
-├── scripts/                   # Training and benchmarking scripts
+├── scripts/                   # Training, benchmarking, and study scripts
 ├── utils/                     # Graph, routing, normalization, and helper functions
 ├── visualization/             # Visualization and graphing utilities
+├── CHANGELOG.md
 ├── requirements.txt
 └── README.md
 ```
@@ -202,11 +207,13 @@ The total loss combines:
 
 Training setup (from the paper's experiments):
 
-* AdamW optimizer (lr `5e-4`, weight decay `3e-5`), cosine schedule, dropout `0.2`
-* 3 gated GNN layers (`L = 6` communication rounds)
+* AdamW optimizer (lr `5e-4`; `1e-3` for unicast; weight decay `3e-5`), cosine schedule, dropout `0.2`
+* 3 gated GNN layers (`L = 6` communication rounds) for F3–F5, 2 gated layers (`L = 4`) for F1–F2
 * QuaDRiGa frequency-selective channels (Rayleigh also supported)
-* SNR range: 0–50 dB in 5 dB steps
-* 2000 training topologies (1600 train / 400 validation), 10 nodes, 6 bands
+* SNR range: 0–50 dB in 5 dB steps, with the SNR given to the model as an input feature
+* 2000 training topologies (ER, `p = 0.3`; 1600 train / 400 validation), 10 nodes (6 for multicast), 6 bands
+
+The per-framework settings are listed in [docs/REPRODUCE.md](docs/REPRODUCE.md#2-training).
 
 ---
 
@@ -215,15 +222,15 @@ Training setup (from the paper's experiments):
 The repository includes comparisons against the following baselines, evaluated by
 `scripts/Optimizer_vs_GNN.py` across the full SNR sweep:
 
-| Baseline                       | Description                                                        |
-| ------------------------------ | ----------------------------------------------------------------- |
-| Centralized Optimizer          | Direct Adam optimization over the full MANET (upper reference)     |
-| MANET-FFN                      | Topology-blind MLP baseline over flattened CSI                     |
-| Widest Path (centralized)      | Strongest-bottleneck route, single-band allocation                |
-| Widest Path (decentralized)    | Distributed strongest-bottleneck route                            |
-| Greedy Split (centralized)     | Shortest-path route, power split across all bands                 |
-| Greedy Split (decentralized)   | Distributed shortest-path greedy split                            |
-| Equal Split                    | Uniform power allocation                                          |
+| Baseline                                   | Description                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------ |
+| B1 Centralized Optimizer                   | AdamW over the full MANET, started from the Greedy-Split, Widest-Path, and MANET-GNN allocations; best iterate kept (reference) |
+| B2 Equal-Split                             | Uniform power over all feasible outgoing links and bands           |
+| B3 Centralized Greedy-Split (CGS)          | Shortest route, power split equally over its links and all bands   |
+| B4 Decentralized Greedy-Split (DGS)        | Bellman–Ford shortest route (L/2 rounds), equal split              |
+| B5 Centralized Widest-Path (CWP)           | Route and band with the strongest bottleneck (ties: fewest hops), single-band allocation |
+| B6 Decentralized Widest-Path (DWP)         | Bellman–Ford max–min widest route                                  |
+| B7 MANET-FFN                               | Topology-blind MLP over the CSI of all links                       |
 
 All methods are scored through the identical **interference-aware** rate objective (same routing
 candidate set and band aggregation), so learned and heuristic allocations are compared on equal footing.
@@ -285,104 +292,90 @@ Typical dependencies include:
 
 ## Running Experiments
 
-Experiments are launched through the simulation/training script using an `.ini` configuration file.
+Experiments are driven by `.ini` config files: a **training** config per model and a **benchmark**
+(comparison) config per evaluation. The exact configs of every result in the paper are in
+[config/paper/](config/paper), and [docs/REPRODUCE.md](docs/REPRODUCE.md) gives the full recipe. Run
+all scripts from the repository root with `PYTHONPATH=.`.
 
-The training script reads all experiment settings from the config file, including:
+```bash
+python scripts/install_paper_configs.py <data root>      # install config/paper/ into a data folder
+set MANET_DATA_ROOT=<data root>                         # PowerShell: $env:MANET_DATA_ROOT = "<data root>"
+```
 
-- Communication framework
-- Number of nodes and bands
-- SNR values
-- Optimizer settings
-- Checkpoint and figure directories
-- CSI estimation mode
-  
 ### Train MANET-GNN
-## Configure an Experiment
 
-Create or edit an `.ini` file. Example:
+Example training config (many-to-many, full CSI):
 
 ```ini
 [Train Parameters]
 seed: 7241
-mode: multi
+mode: multiunicast
 B: 6
-L: 3
+L: 3                      # gated layers (= 2L communication rounds)
 n: 10
-tx: 4
-rx: 1, 6, 7, 9
+tx: 0, 2, 4, 6
+rx: 3, 5, 7, 9
+sigma: 1
 SNR: 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
 dropout: 0.2
 lr: 5e-4
 wd: 3e-5
+noise conditioning: 1     # the SNR is an input feature
+decentralized training: 1
+decentralized validation: 1
+z mode: candidate         # candidate-route routing head (F3-F5)
+routing tau start: 1.0
+routing tau end: 0.05
+reduce: fair
+val reduce: fair
+max route hops: 3
+grad clip: 1
 epochs: 100
 num samples: 2000
 grad batch: 8
-mono: 0.5
-sparsity: 0.05
-LMMSE estimation: 0
+mono: 0.1
+LMMSE estimation: 0       # 1 = train on LMMSE-estimated CSI (loss on the true channel)
 
 [Files]
-channel path: path/to/quadrigat_channels.mat  # If you don't want to use generated Rayleigh channels
-ckpt dir: path/to/checkpoints
-figs dir: path/to/figures
-prefix: _Rayleigh_Multicommodity_n_10_B_6_K_4_L_3
+channel path: <DATA_ROOT>\Quadriga channels\Train_H_seed_48312_n_10_B_6_samples_2000.mat
+ckpt dir: <DATA_ROOT>\Trained Models\multiunicast
+figs dir: <DATA_ROOT>\Figs\multiunicast
+prefix: Quadriga_Multiunicast_n_10_B_6_K_4_z_candidate_noisecond
 ```
 
-
 ```bash
-python Decentralized_MANET_Simulation.py --config path/to/config.ini
+python scripts/Decentralized_MANET_Simulation.py <training config(s)>
+python MANET_FFN/main.py <FFN config(s)>                 # FFN baseline
 ```
 
 ### Benchmark MANET-GNN
 
-Benchmarking is performed using `Optimizer_vs_GNN.py` and a comparison `.ini` file.
-
-Example config:
-
-```ini
-[Train Parameters]
-seed: 15337
-mode: multi
-B: 6
-L: 3
-n: 12
-tx: 7
-rx: 1, 4, 5, 8
-sigma: 1
-dropout: 0.2
-num samples: 20
-LMMSE estimation: 0
-
-[Files]
-channel path: path/to/quadrigat_channels.mat  # If you don't want to use generated Rayleigh channels
-model path: path/to/trained_model.pth
-fig path: path/to/save/benchmark_figure.png
-fig data path: path/to/save/benchmark_results.pkl
-
 ```bash
-python Optimizer_vs_GNN.py --config path/to/config.ini
+python scripts/Optimizer_vs_GNN.py --configs <benchmark config(s)>
+python scripts/run_benchmarks_parallel.py --workers 4   # all benchmark configs, in parallel
 ```
+
+A benchmark config points to the test set, the trained GNN and FFN, and the outputs, and sets the SNR
+grids (`snr list` for all methods, `optimizer snr` for the centralized optimizer); see
+[config/paper/](config/paper) and [docs/DESIGN.md §8](docs/DESIGN.md#8-config-key-reference).
+
 ---
 
 ## Experimental Results
 
-The paper evaluates:
+The paper evaluates the five frameworks (unicast, multicast, multicommodity, convergecast,
+many-to-many) on QuaDRiGa frequency-selective channels, under full and estimated CSI, against the
+benchmarks above. It further studies:
 
-* Unicast
-* Multicast
-* Multicommodity
-* Convergecast
-* Many-to-Many
+* generalization to sparser and denser ER graphs (p = 0.1–0.5) and to non-ER topologies (random
+  geometric and hub/periphery graphs), without retraining;
+* heterogeneous radios, where each node supports only a subset of the channels;
+* the rate achieved versus the number of communication rounds;
+* soft (training) versus hard (inference) route selection;
+* the effect of channel-estimation errors.
 
-under:
-
-* QuaDRiGa frequency-selective channels
-* Full CSI
-* Noisy (estimated) CSI
-
-MANET-GNN consistently approaches centralized optimization performance while preserving decentralized operation.
-
-Representative results are shown in Section IV of the paper.
+MANET-GNN consistently approaches centralized optimization performance while preserving decentralized
+operation. Results are reported in Section IV of the paper.
 
 ---
 

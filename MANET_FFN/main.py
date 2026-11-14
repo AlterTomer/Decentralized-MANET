@@ -826,9 +826,17 @@ def main(cfg_path):
 
 
 if __name__ == "__main__":
-    cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Single Tx-Rx\FFN_single.ini",
-               r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multiunicast\FFN_multiunicast.ini",
-               r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multicommodity\FFN_multicommodity.ini",
-               r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multicast\FFN_multicast.ini"]
+    # cfg_arr = [r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Single Tx-Rx\FFN_single.ini",
+    #            r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multiunicast\FFN_multiunicast.ini",
+    #            r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multicommodity\FFN_multicommodity.ini",
+    #            r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET\Config Files\FFN\Multicast\FFN_multicast.ini"]
+    # Default: the convergecast (F4) FFN configs, full and estimated CSI. Pass other FFN configs on the
+    # command line (see docs/REPRODUCE.md).
+    cfg_arr = [os.path.join(os.environ.get("MANET_DATA_ROOT", r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET"), r"Config Files\FFN\Convergencecast\FFN_convergecast_FullCSI_R2.ini"),
+               os.path.join(os.environ.get("MANET_DATA_ROOT", r"C:\Users\alter\OneDrive\Desktop\PhD\Decentralized MANET"), r"Config Files\FFN\Convergencecast\FFN_convergecast_EstimatedCSI_R2.ini")]
+    # Optional: config paths on the command line replace the list above.
+    import sys
+    if len(sys.argv) > 1:
+        cfg_arr = sys.argv[1:]
     for cfg_path in cfg_arr:
         main(cfg_path)

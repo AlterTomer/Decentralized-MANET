@@ -136,6 +136,10 @@ round of decentralized refinement, and the number of rounds enforces the R2 late
 - **Node features** — an equal-split power prior $`p^{(b)}_{i\to j}\equiv 1/\sqrt{|\mathcal N_i|\,B}`$
   stacked with a role vector $`\mathbf r_i`$ (Tx flag, Rx flag, relay, and $`K`$ commodity slots). Only the
   first $`B`$ entries are propagated as the initial node embedding; the rest are static side information.
+- **Noise conditioning** (`noise conditioning: 1`, used by all reported models) — a global SNR feature
+  $`-\log_{10}(\sigma^2)/5`$ is appended to every node, so the allocation (e.g., the split of power over
+  bands) can adapt to the operating SNR. The flag changes the input dimension, so it must match between
+  the training and benchmark configs (the benchmark refuses a mismatched checkpoint).
 
 ### 4.2 Gated message-passing backbone
 
@@ -145,8 +149,9 @@ $`L=2\cdot\texttt{num\_layers}`$.
 
 > ⚠️ **`L` convention.** The config key **`L` = `num_layers` = number of gated layers**
 > (`scripts/*.py: num_layers=L`). The paper's $`L`$ is the number of *communication rounds*
-> = $`2\times`$ the config `L`. The reported $`|\mathcal V|=10`$ experiments use **3 gated layers**
-> (config `L=3`, the paper's $`L=6`$). The depth ablation sweeps the paper's $`L\in\{2,4,6,10,14\}`$.
+> = $`2\times`$ the config `L`. The multi-message models (F3–F5) use **3 gated layers** (config `L=3`, the
+> paper's $`L=6`$); the unicast and multicast models use 2 (config `L=2`, the paper's $`L=4`$). The depth
+> ablation sweeps the paper's $`L\in\{2,4,6,10,14\}`$.
 
 Per layer $`l`$, each node updates edge and node embeddings locally (all hidden dims $`=B`$):
 
@@ -197,6 +202,13 @@ Z_{b,k,i,j}=\sum_{m}\pi_{b,k,m}\,\mathbf 1\{(i,j)\in p_{k,m}\},\qquad
    Since the argmax is per band, a commodity may use **different routes on different bands**
    (consistent with the band-sum in §1.3). For single-message frameworks the routing variable reduces
    to a per-edge message mask.
+
+   **Unsupported bands** (`mask_dead_routes`, on by default). A message keeps its band along its route,
+   so a (band, route) option with a hop whose coefficient on that band is zero (a node that does not
+   support the band) cannot carry the message. Such options are excluded from the soft and hard
+   selection; if a band has no live route for a commodity, the commodity is not routed over it and
+   `normalize_power` moves its power to the live bands. The test is local, and it is an exact no-op when
+   every link supports every band. It is a plain attribute, not a parameter, so checkpoints load unchanged.
 
 3. **Power projection** — mask the raw amplitude by the (square-root) routing variable and normalize to
    the per-node budget:
@@ -269,14 +281,34 @@ on a candidate route drives that route's `min` to 0 rather than being skipped), 
 widest-path powering the **entire** chosen path. This makes "greedy nearly matches MANET-GNN for unicast"
 a statement about the *same* feasible set and scoring, not an evaluation artifact.
 
-### 5.7 Centralized optimizer as a valid upper reference (B1)
+### 5.7 Centralized optimizer as a reference (B1)
 
-The centralized AdamW optimizer for the objective uses **four initializations** — random, Greedy-Split,
-Widest-Path, and MANET-GNN — runs **1000 iterations with a line search over five step sizes**, projects
-onto the per-node constraints after each update, and **returns the best iterate by the $`\tau=0`$ (hard)
-eval objective**. Multi-initialization guarantees the optimizer $`\ge`$ each of greedy / widest / GNN, so
-it is a sound upper reference. Training-time soft-min/soft-max relaxations (temperatures
-$`\tau_{\min},\tau_{\max}`$, annealed toward hard) provide gradients; eval is always the hard objective.
+The centralized AdamW optimizer solves the objective with full topology and CSI. For every framework it
+starts from **three initializations** — the Greedy-Split, Widest-Path, and MANET-GNN allocations — runs
+**1000 iterations with step size 0.1** from each, projects onto the per-node constraints after each
+update, and **returns the best iterate by the $`\tau=0`$ (hard) eval objective**. Hence it is never below
+any of its initializations. Soft-min/soft-max relaxations (temperatures $`\tau_{\min},\tau_{\max}`$)
+provide its gradients; it is always scored with the hard objective. Config keys: `optimizer snr` (its SNR
+grid), `optimizer lr`, `optimizer iterations`; `optimizer full search: 1` additionally adds a random
+initialization and a grid of step sizes.
+
+### 5.8 Scoring under estimated CSI and heterogeneous radios
+
+- **Estimated CSI.** Every method decides its allocation from the LMMSE estimate $`\hat h`$ (the dataset's
+  `links_matrix`), and every allocation is then **scored on the true channel** (`links_true`) with the
+  hard objective (`ComparisonUtils._score_allocations`), so the reported rate is the rate the allocation
+  achieves. The SNR → $`\sigma`$ mapping uses the true-channel power (`reference_channel_var`), so full-
+  and estimated-CSI runs share the noise level at each nominal SNR.
+- **Heterogeneous radios.** A node cannot transmit on a band it does not support (zero coefficients).
+  Before scoring, each node drops the power it put on unsupported link–bands and rescales the rest to the
+  same total power (`_supported_channel_projection`, local); this is an exact no-op on homogeneous
+  networks.
+
+### 5.9 Widest-Path tie-break
+
+Many routes share the same bottleneck edge, so the centralized Widest-Path (B5) breaks ties by the
+**fewest hops** (fewest edges for multicast), i.e., it selects the shortest widest route — the route the
+Bellman–Ford max–min update of the decentralized Widest-Path (B6) converges to.
 
 ---
 
@@ -306,10 +338,13 @@ single-message **sparsity** term (§5.3):
 $`\{\hat h^{(b)}_{i\to j}\}`$ (AWGN observation model), but the loss is always evaluated on the *true* CSI —
 so improvements are measured in real end-to-end rate under perturbed inputs. Toggled by `LMMSE estimation`.
 
-**Setup (from the paper's experiments).** QuaDRiGa frequency-selective channels; random graphs with edge
-probability $`p\in\{0.1,\dots,0.5\}`$; $`|\mathcal V|=10`$, $`B=6`$. 2000 topologies (1600 train / 400 val),
-trained jointly over **SNR 0–50 dB in 5 dB steps**. **3 gated layers ($`L=6`$ rounds)**, 100 epochs, AdamW
-($`\text{lr}=5\times10^{-4}`$, weight decay $`3\times10^{-5}`$), cosine schedule, dropout $`0.2`$.
+**Setup (from the paper's experiments).** QuaDRiGa frequency-selective channels (`5G-ALLSTAR_DenseUrban`);
+ER training graphs with edge probability $`p=0.3`$; $`|\mathcal V|=10`$ ($`6`$ for multicast), $`B=6`$. 2000
+topologies (1600 train / 400 val), trained jointly over **SNR 0–50 dB in 5 dB steps**. 3 gated layers
+($`L=6`$ rounds) for F3–F5 and 2 ($`L=4`$) for F1–F2, 100 epochs, AdamW ($`\text{lr}=5\times10^{-4}`$;
+$`10^{-3}`$ for unicast; weight decay $`3\times10^{-5}`$), cosine schedule, dropout $`0.2`$, monotonicity
+weight $`\lambda_m=0.1`$. Testing uses fresh connected networks (500 with $`p=0.3`$ for the main results,
+plus the density, topology, and heterogeneous-radio sets); see [REPRODUCE.md](REPRODUCE.md).
 
 ---
 
@@ -321,17 +356,17 @@ interference-aware objective and feasible set (§5.6):
 | Method | Description |
 |--------|-------------|
 | **MANET-GNN** | The proposed decentralized learned optimizer |
-| **Centralized Optimizer** (B1) | AdamW, 4 inits (random / greedy / widest / GNN), 1000 iters, line-search — upper reference |
+| **Centralized Optimizer** (B1) | AdamW from the Greedy-Split, Widest-Path, and MANET-GNN allocations, 1000 iterations, best iterate — reference |
 | **MANET-FFN** | Topology-blind MLP over the flattened channel tensor (no message passing) |
-| **CWP / DWP** | Centralized / Decentralized **Widest-Path** ("Best Single Channel") |
-| **CGS / DGR** | Centralized / Decentralized **Greedy-Split** (shortest route, equal power) |
+| **CWP / DWP** | Centralized / Decentralized **Widest-Path** (strongest-bottleneck route on one band; ties → fewest hops) |
+| **CGS / DGS** | Centralized / Decentralized **Greedy-Split** (shortest route, equal power; DGS runs $`L/2`$ Bellman–Ford rounds) |
 | **Equal-Split** | Uniform power over feasible links and bands |
 
 - **MANET-FFN** is a deliberately **topology-blind** baseline — no Tx/Rx input, so its train Tx/Rx **must**
-  match the benchmark Tx/Rx (keep `FFN_single.ini` synced with the comparison config).
+  match the benchmark Tx/Rx (the configs in `config/paper/` match).
 
-- **Confidence intervals.** All reported results are averaged over **500 independent test topologies**
-  ($`|\mathcal V|=10`$, $`B=6`$; $`K=4`$ for multi-message frameworks). `evaluate_across_snr` records, per method
+- **Confidence intervals.** The main results are averaged over **500 independent connected test
+  topologies** ($`|\mathcal V|=10`$, $`B=6`$; $`K=4`$ for multi-message frameworks). `evaluate_across_snr` records, per method
   per SNR, the mean, the standard error of the mean (`results["sem"]`,
   $`\mathrm{SEM}=\mathrm{std}_{\text{ddof}=1}/\sqrt N`$), and the test-set size (`results["n_test"]`).
   `visualization/GraphingAux.py:plot_mean_rate_vs_snr` renders **95% CIs** ($`\pm1.96\cdot\mathrm{SEM}`$,
@@ -339,12 +374,12 @@ interference-aware objective and feasible set (§5.6):
   pickles predating `sem` fall back to reconstructing it from stored per-sample diagnostics. This makes
   the stability of small inter-method gaps explicit.
 
-**Results at a glance.** The centralized optimizer leads throughout. For **unicast (F1)**, Greedy-Split
-slightly edges MANET-GNN (single-pair routing is near-trivial for greedy). For every **multi-message /
-multi-destination** framework (**F2–F5**), MANET-GNN is the strongest method after the centralized
-optimizer from moderate SNR onward — heuristics that pick short/high-bottleneck routes independently
-cannot coordinate commodities competing for shared power and interference. Orderings are preserved under
-estimated CSI.
+- **Per-network results.** `results["per_sample"][method][snr]` holds the rate of every test network
+  (dataset order), and density results also store each network's ER edge probability
+  (`results["p_vec"]`), from which the per-$`p`$ and "within reach" breakdowns are computed.
+
+**Results.** See Section IV of the paper; [REPRODUCE.md](REPRODUCE.md) maps each figure and table to its
+configs.
 
 ---
 
@@ -362,8 +397,23 @@ Selected keys under `[Train Parameters]` (see the README for full examples):
 | `mono` | Monotonicity regularizer weight $`\lambda_m`$ |
 | `sparsity` | Single-message edge-sparsity weight $`\lambda_s`$ (§5.3; default 0) |
 | `reduce` / `val reduce` | Multi-message reduction: `fair` (max–min) vs `mean`/`sum` (§5.5) |
-| `LMMSE estimation` | Noisy-CSI (LMMSE) training toggle (R4) |
-| `dropout`, `lr`, `wd`, `epochs`, `num samples`, `grad batch` | Standard training hyperparameters |
+| `LMMSE estimation` | Noisy-CSI (LMMSE) toggle (R4): train / benchmark on estimated CSI |
+| `noise conditioning` | Append the SNR feature to the node inputs (§4.1); must match between training and benchmark |
+| `z mode`, `max route hops`, `routing tau start` / `routing tau end` | Candidate routing head (F3–F5), candidate hop limit, routing temperature annealing |
+| `decentralized training` / `decentralized validation` / `decentralized gnn inference`, `hard candidate gnn inference` | Local (≤ `max route hops`) candidate sets; hard per-band argmax at inference |
+| `sparsity`, `p head bias init` | Single-message sparsity weight; initial bias of the power head |
+| `dropout`, `lr`, `wd`, `epochs`, `num samples`, `grad batch`, `grad clip` | Standard training hyperparameters |
+
+Benchmark configs additionally use:
+
+| Key | Meaning |
+|-----|---------|
+| `num samples` | Number of test networks (the first N of the channel file) |
+| `snr list` | SNR grid (dB) of all methods |
+| `optimizer snr` | SNR grid of the centralized optimizer (`999` skips it) |
+| `optimizer lr`, `optimizer iterations`, `optimizer full search` | Centralized-optimizer settings (defaults 0.1, 1000, 0; §5.7) |
+| `collect diagnostics`, `diagnostics snr` | Store allocation diagnostics at these SNRs |
+| `model path`, `ffn path`, `fig path`, `fig data path` | Trained GNN checkpoint, FFN folder, output figure and results pickle |
 
 ---
 
